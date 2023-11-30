@@ -2,7 +2,7 @@
 
 // MVP FIRST!!! 
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::io::Write;
 
@@ -43,9 +43,9 @@ struct Routine {
 }
 
 impl Routine {
-    fn to_asm(&self, globals: &[GlobalData]) -> String {
+    fn to_asm(&self, globals: &[GlobalData], config: &Config) -> String {
         let mut out = String::new();
-        let mut alloc = RegAlloc::new();
+        let mut alloc = RegAlloc::new(Reg::count());
         let mut last_occurrence = Vec::new();
         for (i, op) in self.ops.iter().enumerate() {
             for &var in op.vars_referenced() {
@@ -56,17 +56,25 @@ impl Routine {
             }
         }
         writeln!(out, "{name}:", name = self.name).unwrap();
+        let mut vasm = VecDeque::new();
         for (i, op) in self.ops.iter().enumerate() {
             let asm = op.to_asm(&mut alloc);
-            for instr in asm {
-                instr.write_op(&mut out, globals);
-            }
+            vasm.extend(asm);
             for &var in op.vars_referenced() {
                 if last_occurrence[var] <= i {
                     alloc.free(var);
                 }
             }
         }
+        if alloc.stack_needed() > 0 {
+            vasm.push_front(AsmOp::Mov(OpTarget::Reg(Reg::Rbp.idx()), OpTarget::Reg(Reg::Rsp.idx())));
+            vasm.push_front(AsmOp::Push(Reg::Rbp));
+            vasm.push_back(AsmOp::Pop(Reg::Rbp));
+        }
+        for asm in vasm {
+            asm.write_op(&mut out, globals, config);
+        }
+        
         writeln!(out).unwrap();
         out
     }
@@ -75,7 +83,7 @@ impl Routine {
 #[derive(Debug)]
 enum OpTarget {
     Literal(u64),
-    Reg(Reg),
+    Reg(u8),
     Label(usize),
     Stack(usize),
 }
@@ -84,7 +92,7 @@ impl OpTarget {
     fn to_display(&self, w: &mut impl std::fmt::Write, globals: &[GlobalData], ptr_load: bool) -> std::fmt::Result {
         match self {
             OpTarget::Literal(x) => write!(w, "{x}"),
-            OpTarget::Reg(r) => write!(w, "{}", r.name()),
+            OpTarget::Reg(r) => write!(w, "{}", Reg::from_idx(*r).name()),
             OpTarget::Label(i) if ptr_load => write!(w, "qword ptr [rip + {}]", globals[*i].name),
             OpTarget::Label(i) => write!(w, "[rip + {}]", globals[*i].name),
             OpTarget::Stack(s) if ptr_load => write!(w, "qword ptr [rsp + {s}]"),
@@ -95,13 +103,17 @@ impl OpTarget {
 
 #[derive(Debug)]
 enum AsmOp {
+    Push(Reg),
+    Pop(Reg),
+    Add(OpTarget, OpTarget, OpTarget),
+    Comment(String),
     Mov(OpTarget, OpTarget),
     Lea(Reg, OpTarget),
     Syscall
 }
 
 impl AsmOp {
-    fn write_op(&self, w: &mut impl std::fmt::Write, globals: &[GlobalData]) -> std::fmt::Result {
+    fn write_op(&self, w: &mut impl std::fmt::Write, globals: &[GlobalData], config: &Config) -> std::fmt::Result {
         match self {
             AsmOp::Mov(dst, src) => {
                 write!(w, "    mov ")?;
@@ -117,6 +129,19 @@ impl AsmOp {
                 writeln!(w)
             },
             AsmOp::Syscall => writeln!(w, "    syscall"),
+            AsmOp::Comment(s) if config.emit_comments => writeln!(w, "    /* {s} */"),
+            AsmOp::Comment(s) => Ok(()),
+            AsmOp::Push(r) => writeln!(w, "    pushq {reg}", reg = r.name()),
+            AsmOp::Pop(r) => writeln!(w, "    popq {reg}", reg = r.name()),
+            AsmOp::Add(dst, op1, op2) => {
+                write!(w, "    add ")?;
+                dst.to_display(w, globals, false)?;
+                write!(w, " , ")?;
+                op1.to_display(w, globals, false)?;
+                write!(w, " , ")?;
+                op2.to_display(w, globals, false)?;
+                writeln!(w)
+            },
         }
     }
 }
@@ -133,6 +158,7 @@ impl Op {
                 if *id == 0 {
                     let mut ret = alloc.setup_call(&args, CallType::Syscall);
                     ret.push(AsmOp::Syscall);
+                    ret.push(AsmOp::Comment(format!("^^^ has arguments {args:?}")));
                     // eprintln!("syscall complete");
                     ret
                 } else {
@@ -140,12 +166,12 @@ impl Op {
                 }
             },
             Op::Load { loc, val } => {
-                let reg = Reg::from_loc(*loc);
                 let ret = match val {
                     Val::GlobalLabel(g) => {
                         let reg = alloc.move_to_reg(*loc);
                         let mut ret = alloc.take_queue();
-                        ret.push(AsmOp::Lea(reg, OpTarget::Label(*g)));
+                        ret.push(AsmOp::Lea(Reg::from_idx(reg), OpTarget::Label(*g)));
+                        ret.push(AsmOp::Comment(format!(" ^^^ loading to L_{loc}")));
                         // eprintln!("load of {val:?} to {loc} ({reg:?}) complete");
                         ret
                     },
@@ -154,6 +180,7 @@ impl Op {
                         let reg = alloc.move_to_reg(*loc);
                         let mut ret = alloc.take_queue();
                         ret.push(AsmOp::Mov(OpTarget::Reg(reg), OpTarget::Literal(*v)));
+                        ret.push(AsmOp::Comment(format!(" ^^^ loading literal to L_{loc}")));
                         // eprintln!("load of {val:?} to {loc} ({reg:?}) complete");
                         ret
                     }
@@ -178,221 +205,9 @@ impl Op {
     }
 }
 
-enum VarLoc {
-    Stack(usize),
-    Reg { reg: Reg, stack_slot: Option<usize> },
-    Uninit,
-}
 
-struct RegAlloc{
-    vars: BTreeMap<Loc, VarLoc>,
-    regs: [Option<Loc>; Reg::count()],
-    times: [usize; Reg::count()],
-    age: usize,
-    max_stack: usize,
-    free_stack: Vec<usize>,
-    opqueue: Vec<AsmOp>,
-}
-
-impl RegAlloc {
-    fn new() -> Self {
-        Self {
-            vars: BTreeMap::new(),
-            regs: [None; Reg::count()],
-            times: [0; Reg::count()],
-            age: 0,
-            max_stack: 0,
-            free_stack: Vec::new(),
-            opqueue: Vec::new(),
-        }
-    }
-
-    fn free_reg(&self) -> Option<usize> {
-        self.regs.iter().position(|x| x == &None)
-    }
-
-    fn touch_reg(&mut self, reg: Reg) {
-        self.age += 1;
-        self.times[reg.idx()] = self.age
-    }
-
-    fn reserve_stack(&mut self) -> usize {
-        if let Some(free) = self.free_stack.pop() {
-            return free;
-        }
-        let ret = self.max_stack;
-        self.max_stack += 8;
-        ret
-    }
-
-    /// allocates space for var on the stack and evicts it if need be
-    fn evict_var(&mut self, var: Loc) {
-        if let Some(entry) = self.vars.get_mut(&var) {
-            let VarLoc::Reg { reg: r, stack_slot} = entry else {
-                // already on the stack
-                return;
-            };
-            let slot = if let Some(slot) = *stack_slot {
-                slot
-            } else {
-                if let Some(free) = self.free_stack.pop() {
-                    free
-                } else {
-                    let ret = self.max_stack;
-                    self.max_stack += 8;
-                    ret
-                }
-            };
-            // eprintln!("evicting {var:?} from {r:?} to stack offset {slot:?}");
-            self.opqueue.push(AsmOp::Mov(OpTarget::Stack(slot), OpTarget::Reg(*r)));
-            *entry = VarLoc::Stack(slot);
-        }
-    }
-
-    /// frees register
-    fn evict_reg(&mut self, reg: Reg) {
-        let idx = reg.idx();
-        if let Some(var) = self.regs[idx] {
-            self.evict_var(var);
-        }
-    }
-
-    fn evict_oldest(&mut self) -> usize {
-        let oldest = self.times.iter().enumerate().min_by_key(|&(_i, &a)| a).expect("nonempty array").0;
-        self.evict_reg(Reg::from_loc(oldest));
-        oldest
-    }
-
-    fn evict_oldest_protected(&mut self, protected: &[Reg]) -> usize {
-        let oldest = self.times.iter()
-            .enumerate()
-            .filter(|&(i, _)| !protected.contains(&Reg::from_loc(i)))
-            .min_by_key(|&(_i, &a)| a)
-            .expect("nonempty array and protected leaves room").0;
-        self.evict_reg(Reg::from_loc(oldest));
-        oldest
-    }
-
-    fn move_to_specific_reg(&mut self, var: Loc, target: Reg) {
-        self.touch_reg(target);
-        if let Some(curr) = self.vars.get_mut(&var) {
-            match curr {
-                VarLoc::Stack(slot) => {
-                    let slot = *slot;
-                    let reg = self.evict_reg(target);
-                    self.regs[target.idx()] = Some(var);
-                    let curr = self.vars.get_mut(&var).expect("var declared");
-                    *curr = VarLoc::Reg { reg: target, stack_slot: Some(slot) };
-                    self.opqueue.push(AsmOp::Mov(OpTarget::Reg(target), OpTarget::Stack(slot)));
-                },
-                VarLoc::Reg { reg, .. } => {
-                    let reg = *reg;
-                    if reg == target {
-                        // already in the right spot, don't need to do anything
-                        return;
-                    }
-                    self.evict_reg(target);
-                    self.opqueue.push(AsmOp::Mov(OpTarget::Reg(target), OpTarget::Reg(reg)));
-                },
-                VarLoc::Uninit => todo!(),
-            };
-        } else {
-            panic!("cannot move uninitialized var {var} to register {target:?}");
-        }
-    }
-
-    fn move_to_reg_protected(&mut self, var: Loc, protected: &[Reg]) -> Reg {
-        if let Some(curr) = self.vars.get_mut(&var) {
-            match curr {
-                VarLoc::Stack(slot) => {
-                    let slot = *slot;
-                    let reg = self.evict_oldest_protected(protected);
-                    self.regs[reg] = Some(var);
-                    let reg = Reg::from_loc(reg);
-                    self.touch_reg(reg);
-                    let curr = self.vars.get_mut(&var).expect("var declared");
-                    *curr = VarLoc::Reg { reg, stack_slot: Some(slot) };
-                    self.opqueue.push(AsmOp::Mov(OpTarget::Reg(reg), OpTarget::Stack(slot)));
-                    reg
-                },
-                VarLoc::Reg { reg, .. } => {
-                    let reg = *reg;
-                    assert!(!protected.contains(&reg));
-                    self.touch_reg(reg);
-                    reg
-                },
-                VarLoc::Uninit => todo!(),
-            }
-        } else {
-            let reg = self.evict_oldest_protected(protected);
-            self.regs[reg] = Some(var);
-            let reg = Reg::from_loc(reg);
-            self.touch_reg(reg);
-            self.vars.insert(var, VarLoc::Reg { reg, stack_slot: None });
-            reg
-        }
-    }
-
-    fn move_to_reg(&mut self, var: Loc) -> Reg {
-        self.move_to_reg_protected(var, &[])
-    }
-
-    fn setup_call(&mut self, vars: &[Loc], call_type: CallType) -> Vec::<AsmOp> {
-        eprintln!("Setting up {call_type:?} with arguments {vars:?}");
-        if let Some(args_regs) = call_type.arg_regs() {
-            eprintln!("\thas a specific calling convention");
-            let arg_regs = &args_regs[..vars.len()];
-            for (&var, &target) in vars.iter().zip(args_regs) {
-                eprintln!("\tloading {target:?} <- {var:?}");
-                self.move_to_specific_reg(var, target);
-            }
-        } else {
-            eprintln!("\tHas no particular calling convention - moving everything to regs");
-            let mut occupied = Vec::with_capacity(vars.len());
-            for &var in vars {
-                let reg = self.move_to_reg_protected(var, &occupied);
-                occupied.push(reg);
-                eprintln!("\tloading {reg:?} <- {var:?}");
-            }
-        }
-        self.take_queue()
-    }
-
-    fn take_queue(&mut self) -> Vec<AsmOp> {
-        // eprintln!("exporting assembly: {:?}", self.opqueue);
-        std::mem::take(&mut self.opqueue)
-    }
-
-    fn var_location(&self, var: Loc) -> OpTarget {
-        match self.vars[&var] {
-            VarLoc::Stack(stack) => OpTarget::Stack(stack),
-            VarLoc::Reg { reg, stack_slot } => OpTarget::Reg(reg),
-            VarLoc::Uninit => todo!(),
-        }
-    }
-
-    fn var_reg(&self, var: Loc) -> Reg {
-        let reg = self.regs.iter().position(|&v| v == Some(var)).expect("var_reg should only be called on vars in registers");
-        Reg::from_loc(reg)
-    }
-
-    fn free(&mut self, var: Loc) {
-        match self.vars[&var] {
-            VarLoc::Stack(s) => {
-                self.free_stack.push(s);
-            },
-            VarLoc::Reg { reg, stack_slot } => {
-                if let Some(slot) = stack_slot {
-                    self.free_stack.push(slot);
-                }
-                self.regs[reg.idx()] = None;
-                self.times[reg.idx()] = 0;
-            },
-            VarLoc::Uninit => todo!(),
-        };
-        self.vars.remove(&var);
-    }
-}
+mod reg_alloc;
+use reg_alloc::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CallType {
@@ -409,6 +224,14 @@ impl CallType {
             CallType::Op3 => None,
         }
     }
+    fn arg_regs_idx(&self) -> Option<&[u8]> {
+        const SYSCALL_REGS: [u8; 4] = [Reg::Rax.idx(), Reg::Rdi.idx(), Reg::Rsi.idx(), Reg::Rdx.idx()];
+        match self {
+            CallType::Syscall => Some(&SYSCALL_REGS),
+            CallType::Op2 => None,
+            CallType::Op3 => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -420,52 +243,84 @@ enum Reg {
     Rdi,
     Rsp,
     Rbp,
+    R8,
+    R9,
+    R10,
+    R11,
+    R12,
+    R13,
+    R14,
+    R15,
 }
 
 impl Reg {
     const fn count() -> usize {
-        5
+        13
     }
 
-    fn from_loc(loc: Loc) -> Self {
+    const fn from_idx(loc: u8) -> Self {
         match loc {
             0 => Self::Rax,
             1 => Self::Rcx,
             2 => Self::Rdx,
             3 => Self::Rsi,
             4 => Self::Rdi,
-            5 => Self::Rsp,
-            6 => Self::Rbp,
-            _ => unimplemented!("no register allocator")
+            5 => Self::R8,
+            6 => Self::R9,
+            7 => Self::R10,
+            8 => Self::R11,
+            9 => Self::R12,
+            10 => Self::R13,
+            11 => Self::R14,
+            12 => Self::R15,
+            13 => Self::Rsp,
+            14 => Self::Rbp,
+            _ => panic!("no register allocator")
         }
     }
 
-    fn idx(&self) -> usize {
+    const fn idx(self) -> u8 {
         match self {
             Self::Rax => 0,
             Self::Rcx => 1,
             Self::Rdx => 2,
             Self::Rsi => 3,
             Self::Rdi => 4,
-            Self::Rsp => 5,
-            Self::Rbp => 6,
+            Self::R8 => 5,
+            Self::R9 => 6,
+            Self::R10 => 7,
+            Self::R11 => 8,
+            Self::R12 => 9,
+            Self::R13 => 10,
+            Self::R14 => 11,
+            Self::R15 => 12,
+            Self::Rsp => 13,
+            Self::Rbp => 14,
         }
     }
 
     fn name(&self) -> &'static str {
         match self {
-            Reg::Rax => "rax",
-            Reg::Rcx => "rcx",
-            Reg::Rdx => "rdx",
-            Reg::Rsi => "rsi",
-            Reg::Rdi => "rdi",
-            Reg::Rsp => "rsp",
-            Reg::Rbp => "rbp",
+            Self::Rax => "rax",
+            Self::Rcx => "rcx",
+            Self::Rdx => "rdx",
+            Self::Rsi => "rsi",
+            Self::Rdi => "rdi",
+            Self::Rsp => "rsp",
+            Self::Rbp => "rbp",
+            Self::R8 => "r8",
+            Self::R9 => "r9",
+            Self::R10 => "r10",
+            Self::R11 => "r11",
+            Self::R12 => "r12",
+            Self::R13 => "r13",
+            Self::R14 => "r14",
+            Self::R15 => "r15",
         }
     }
 }
 
-fn make_asm(globals: &[GlobalData], functions: &[Routine]) -> String {
+fn make_asm(globals: &[GlobalData], functions: &[Routine], config: &Config) -> String {
     let mut s = String::new();
     writeln!(s, ".intel_syntax noprefix");
     writeln!(s, ".intel_mnemonic");
@@ -475,7 +330,7 @@ fn make_asm(globals: &[GlobalData], functions: &[Routine]) -> String {
     writeln!(s);
     for routine in functions {
         writeln!(s, "    .globl {}", routine.name).unwrap();
-        write!(s, "{}", routine.to_asm(&globals)).unwrap();
+        write!(s, "{}", routine.to_asm(&globals, config)).unwrap();
     }
 
     writeln!(s);
@@ -487,6 +342,24 @@ fn make_asm(globals: &[GlobalData], functions: &[Routine]) -> String {
     s
 }
 
+macro_rules! lang {
+    () => {
+        
+    };
+}
+
+struct Config {
+    emit_comments: bool,
+}
+
+impl Config {
+    fn new() -> Self {
+        Self {
+            emit_comments: true,
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>>{
     let globals = [
         GlobalData {
@@ -494,6 +367,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>>{
             data: b"Hello, World!\n".as_slice().into(),
         }
     ];
+    let config = Config {
+        emit_comments: true,
+    };
     // syscall uses rdi rsi rdx r10 r8 r9
     let functions = [
         Routine {
@@ -512,9 +388,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>>{
     ];
 
 
+    let asm = make_asm(&globals, &functions, &config);
+
     let mut f = std::fs::File::create("out.s")?;
     f.set_len(0);
-    let asm = make_asm(&globals, &functions);
     write!(f, "{asm}");
 
     let success = std::process::Command::new("as")
