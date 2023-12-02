@@ -1,19 +1,52 @@
 use crate::Loc;
+use crate::Op;
 use crate::Reg;
 use crate::{AsmOp, CallType, OpTarget};
 
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
+use std::fmt::Debug;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum VarLoc {
-    Stack(usize),
-    Reg { reg: u8, stack_slot: Option<usize> },
+    Stack { slot: usize },
+    Reg { reg: u8 },
     Uninit,
 }
 
+impl Debug for VarLoc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VarLoc::Stack { slot } => write!(f, "stack location {slot}"),
+            VarLoc::Reg { reg } => write!(f, "register {reg:?}", reg = Reg::from_idx(*reg)),
+            VarLoc::Uninit => write!(f, "uninitialized var"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum RegAllocOp {
+    ReserveReg(u8),
+    MakeRedundantVal(Loc),
+    MakeRedundantReg(u8),
+    SetupCall(CallType, Vec<Loc>),
+    FreeReg(u8),
+}
+
+// #[derive(Clone, Copy, PartialEq, Eq)]
+// enum RegEntry {
+//     /// the entry can be overwritten and reading from it is undefined behavior
+//     Garbage,
+//     /// the entry is nonprimary and can be overwritten.
+//     Aliases(Loc),
+//     /// the entry is the only location for this variable
+//     Occupied(Loc),
+// }
+
+
 #[derive(Clone)]
 pub struct RegAlloc {
-    vars: BTreeMap<Loc, VarLoc>,
+    vars: BTreeMap<Loc, Vec<VarLoc>>,
     regs: Vec<Option<Loc>>,
     times: Vec<usize>,
     age: usize,
@@ -42,7 +75,12 @@ impl RegAlloc {
         self.regs.iter().position(|x| x == &None)
     }
 
+    fn is_var_init(&self, var: Loc) -> bool {
+        self.vars.get(&var).is_some_and(|v| !v.is_empty())
+    }
+
     pub fn touch_reg(&mut self, reg: u8) {
+        // eprintln!("touching {reg:?}", reg = Reg::from_idx(reg));
         self.age += 1;
         self.times[reg as usize] = self.age
     }
@@ -56,37 +94,54 @@ impl RegAlloc {
         ret
     }
 
-    /// frees register
-    fn evict_reg(&mut self, reg: u8) {
-        let idx = reg as usize;
-        if let Some(var) = self.regs[idx] {
-            let Some(entry) = self.vars.get(&var) else {
-                panic!("register var is not defined");
+    /// simply removes the entry in vars of the contents of reg without touching anything else
+    fn remove_reg_entry(&mut self, reg: u8) {
+        let Some(var) = self.regs[reg as usize] else { return };
+        let Some(entry) = self.vars.get_mut(&var) else { return };
+        let Some(pos) = entry.iter().position(|v| VarLoc::Reg { reg } == *v) else { return };
+        // self.opqueue
+        //     .push(AsmOp::Comment(format!("deleted reg entry for var L_{var}")));
+        entry.swap_remove(pos);
+    }
+
+    fn backup_reg(&mut self, reg: u8) {
+        if let Some(val) = self.regs[reg as usize] {
+            self.backup_val(val)
+        }
+    }
+
+    fn backup_val(&mut self, var: Loc) {
+        let Some(entry) = self.vars.get(&var) else {
+            panic!("var {var} is not defined and so can't be backed up");
+        };
+
+        if entry.len() > 1 {
+            // redundancy exists!
+            return;
+        }
+
+        let source = entry[0];
+
+        if let Some(free_reg) = self.free_reg() {
+            self.touch_reg(free_reg as u8);
+            self.regs[free_reg] = Some(var);
+            let new_loc = VarLoc::Reg {
+                reg: free_reg as u8,
             };
-            let VarLoc::Reg { reg: r, stack_slot } = entry else {
-                panic!("register var is in register but recorded as in the stack");
-            };
-            if let Some(free_reg) = self.free_reg() {
-                self.regs[free_reg] = Some(var);
-                self.vars.insert(
-                    var,
-                    VarLoc::Reg {
-                        reg: free_reg as u8,
-                        stack_slot: *stack_slot,
-                    },
-                );
-                self.opqueue.push(AsmOp::Mov(
-                    OpTarget::Reg(free_reg as u8),
-                    OpTarget::Reg(reg),
-                ));
-                self.opqueue.push(AsmOp::Comment(format!(
-                    " ^^^ L_{var} from {reg:?} to free",
-                    reg = Reg::from_idx(reg)
-                )));
-            } else {
-                let slot = if let Some(slot) = *stack_slot {
-                    slot
-                } else {
+            let entry = self.vars.entry(var).or_default().push(new_loc);
+            self.opqueue.push(AsmOp::Mov(
+                OpTarget::Reg(free_reg as u8),
+                source.into(),
+            ));
+            self.opqueue.push(AsmOp::Comment(format!(
+                " ^^^ L_{var} from {reg:?} to free for backup",
+                reg = source
+            )));
+        } else {
+            // make sure this var exists on the stack
+            let entry = self.vars.entry(var).or_default();
+            if entry.iter().find(|x| matches!(x, VarLoc::Stack {..})).is_none() {
+                let slot = {
                     if let Some(free) = self.free_stack.pop() {
                         free
                     } else {
@@ -95,34 +150,51 @@ impl RegAlloc {
                         ret
                     }
                 };
-                let r = *r;
-                self.vars.insert(var, VarLoc::Stack(slot));
+                entry.push(VarLoc::Stack { slot });
                 self.opqueue
-                    .push(AsmOp::Mov(OpTarget::Stack(slot), OpTarget::Reg(r)));
+                    .push(AsmOp::Mov(OpTarget::Stack(slot), source.into()));
                 self.opqueue
-                    .push(AsmOp::Comment(format!(" ^^^ L_{var} to stack")));
+                    .push(AsmOp::Comment(format!(" ^^^ L_{var} to stack for backup")));
             }
         }
+    }
+
+    /// frees register, making sure the current value is preserved
+    fn evict_reg(&mut self, reg: u8) {
+        let idx = reg as usize;
+        if let Some(var) = self.regs[idx] {
+            self.opqueue.push(AsmOp::Comment(format!("evicting var L_{var} from {reg:?}", reg = Reg::from_idx(reg))));
+            let Some(entry) = self.vars.get(&var) else {
+                panic!("entry for var {var} does not exist, but exists in reg {reg}");
+            };
+            self.backup_reg(reg);
+        }
+        self.remove_reg_entry(reg);
+        self.regs[reg as usize] = None;
+    }
+
+    pub fn clobber_reg(&mut self, reg: u8) {
+        if let Some(var) = self.regs[reg as usize] {
+            self.opqueue.push(AsmOp::Comment(format!("{reg:?} was clobbered", reg = Reg::from_idx(reg))));
+        }
+        self.remove_reg_entry(reg);
         self.regs[reg as usize] = None;
     }
 
     fn oldest(&self) -> u8 {
-        self.times
-            .iter()
-            .enumerate()
-            .min_by_key(|&(_i, &a)| a)
-            .expect("nonempty array")
-            .0 as u8
+        self.oldest_protected(&[])
     }
 
     fn oldest_protected(&self, protected: &[u8]) -> u8 {
-        self.times
+        let ret = self.times
             .iter()
             .enumerate()
             .filter(|&(i, _)| !protected.contains(&(i as u8)))
             .min_by_key(|&(_i, &a)| a)
             .expect("nonempty array and protected leaves room")
-            .0 as u8
+            .0 as u8;
+        // eprintln!("out of {times:?}, {ret} ({reg:?}) is the oldest", times = self.times, reg = Reg::from_idx(ret));
+        ret
     }
 
     fn evict_oldest(&mut self) -> u8 {
@@ -137,124 +209,97 @@ impl RegAlloc {
         oldest
     }
 
+    /// find the fastest place we can copy var from
+    fn fastest_source(&self, var: Loc) -> VarLoc {
+        let Some(entry) = self.vars.get(&var) else {
+            panic!("cannot source uninitialized var {var}");
+        };
+        *entry.iter().reduce(|l, r| {
+            match (l, r) {
+                (_, VarLoc::Reg { reg }) => r,
+                (VarLoc::Reg { reg }, _) => l,
+                (VarLoc::Uninit, _) | (_, VarLoc::Uninit) => todo!(),
+                _ => l
+            }
+        }).expect("source exists")
+    }
+
     fn move_to_specific_reg(&mut self, var: Loc, target: u8) {
+        // self.opqueue.push(AsmOp::Comment(format!("moving var L_{var} to {reg:?}", reg = Reg::from_idx(target))));
+        // self.opqueue.push(AsmOp::Comment(format!("> current: {:?}", self.vars.get(&var))));
         self.touch_reg(target);
-        if let Some(curr) = self.vars.get_mut(&var) {
-            match curr {
-                VarLoc::Stack(slot) => {
-                    let slot = *slot;
-                    self.evict_reg(target);
-                    assert_eq!(self.regs[target as usize], None);
-                    self.regs[target as usize] = Some(var);
-                    let curr = self.vars.get_mut(&var).expect("var declared");
-                    *curr = VarLoc::Reg {
-                        reg: target,
-                        stack_slot: Some(slot),
-                    };
-                    self.opqueue
-                        .push(AsmOp::Mov(OpTarget::Reg(target), OpTarget::Stack(slot)));
-                    self.opqueue
-                        .push(AsmOp::Comment(format!(" ^^^ L_{var} := *(rsp + {slot})")));
-                }
-                VarLoc::Reg { reg, .. } => {
-                    if *reg == target {
-                        // already in the right spot, don't need to do anything
-                        return;
-                    }
-                    let prev = *reg;
-                    self.evict_reg(target);
-                    let Some(VarLoc::Reg { reg, .. }) = self.vars.get_mut(&var) else {
-                        panic!("reg was removed from tree during eviction");
-                    };
-                    assert_eq!(prev, *reg, "register changed during eviction");
-                    let src = *reg;
-                    *reg = target;
-                    assert_eq!(self.regs[target as usize], None);
-                    self.regs[target as usize] = Some(var);
-                    self.regs[src as usize] = None;
-                    self.opqueue
-                        .push(AsmOp::Mov(OpTarget::Reg(target), OpTarget::Reg(src)));
-                    self.opqueue.push(AsmOp::Comment(format!(
-                        " ^^^ L_{var} := {reg:?}",
-                        reg = Reg::from_idx(src)
-                    )));
-                }
-                VarLoc::Uninit => todo!(),
-            };
+        if self.regs[target as usize] == Some(var) {
+            self.opqueue.push(AsmOp::Comment(format!(" L_{var} is already in {reg:?}", reg = Reg::from_idx(target))));
+            return;
+        };
+        self.evict_reg(target);
+        if self.is_var_init(var) {
+            let source = self.fastest_source(var);
+            self.vars.entry(var).or_default().push(VarLoc::Reg { reg: target });
+            self.opqueue
+                .push(AsmOp::Mov(OpTarget::Reg(target), source.into()));
+            self.opqueue
+                .push(AsmOp::Comment(format!(" ^^^ L_{var}")));
         } else {
-            panic!("cannot move uninitialized var {var} to register {target:?}");
+            self.vars.entry(var).or_default().push(VarLoc::Reg { reg: target });
+            self.opqueue
+                .push(AsmOp::Comment(format!("uninitialized L_{var} to {reg:?}", reg = Reg::from_idx(target))));
         }
+        self.regs[target as usize] = Some(var);
     }
 
     fn move_to_reg_protected(&mut self, var: Loc, protected: &[u8]) -> u8 {
-        if let Some(curr) = self.vars.get_mut(&var) {
-            match curr {
-                VarLoc::Stack(slot) => {
-                    let slot = *slot;
-                    let reg = self.evict_oldest_protected(protected);
-                    self.regs[reg as usize] = Some(var);
-                    self.touch_reg(reg);
-                    let curr = self.vars.get_mut(&var).expect("var declared");
-                    *curr = VarLoc::Reg {
-                        reg,
-                        stack_slot: Some(slot),
-                    };
-                    self.opqueue
-                        .push(AsmOp::Mov(OpTarget::Reg(reg), OpTarget::Stack(slot)));
-                    self.opqueue
-                        .push(AsmOp::Comment(format!(" ^^^ L_{var} := *(rsp + {slot})")));
-                    reg
-                }
-                VarLoc::Reg { reg, .. } => {
-                    let reg = *reg;
-                    assert!(!protected.contains(&reg));
-                    self.touch_reg(reg);
-                    reg
-                }
-                VarLoc::Uninit => todo!(),
-            }
-        } else {
-            let reg = self.evict_oldest_protected(protected);
-            self.regs[reg as usize] = Some(var);
-            self.touch_reg(reg);
-            self.vars.insert(
-                var,
-                VarLoc::Reg {
-                    reg,
-                    stack_slot: None,
-                },
-            );
-            reg as u8
+        if let Some(reg) = self.var_reg(var) {
+            debug_assert!(!protected.contains(&reg));
+            self.opqueue
+                .push(AsmOp::Comment(format!(" L_{var} already in registers")));
+            return reg;
         }
+        if !self.is_var_init(var) {
+            let target = self.evict_oldest_protected(protected);
+            self.touch_reg(target);
+            self.vars.entry(var).or_default().push(VarLoc::Reg { reg: target });
+            self.regs[target as usize] = Some(var);
+            return target
+        }
+        let source = self.fastest_source(var).into();
+        let target = self.evict_oldest_protected(protected);
+        self.touch_reg(target);
+        self.opqueue
+            .push(AsmOp::Mov(OpTarget::Reg(target), source));
+        self.opqueue
+            .push(AsmOp::Comment(format!(" ^^^ L_{var}")));
+        self.regs[target as usize] = Some(var);
+        target
     }
 
     pub fn move_to_reg(&mut self, var: Loc) -> u8 {
         self.move_to_reg_protected(var, &[])
     }
 
-    /// redefines var to be in reg. implicitly frees any var currently in reg. does not generate
+    /// (re)defines var to be in reg. implicitly frees any var currently in reg. does not generate
     /// assembly
     pub fn force_reg(&mut self, var: Loc, reg: u8) {
-        if let Some(to_free) = self.regs[reg as usize] {
-            self.vars.remove(&to_free);
+        self.remove_reg_entry(reg);
+        self.touch_reg(reg);
+        let v = self.vars.entry(var).or_default();
+        if !v.contains(&VarLoc::Reg { reg }) {
+            v.push(VarLoc::Reg { reg });
         }
-        // let entry = self.vars.get_mut(&var).expect("var is nonexistent");
-        let Some(entry) = self.vars.get_mut(&var) else { return };
-        match entry {
-            VarLoc::Stack(slot) => *entry = VarLoc::Reg { reg, stack_slot: Some(*slot) },
-            VarLoc::Reg { reg: old_reg, stack_slot } => *old_reg = reg,
-            VarLoc::Uninit => unimplemented!(),
-        };
+        self.regs[reg as usize] = Some(var);
     }
 
     pub(crate) fn setup_call(&mut self, vars: &[Loc], call_type: CallType) -> Vec<AsmOp> {
         eprintln!("Setting up {call_type:?} with arguments {vars:?}");
         if let Some(args_regs) = call_type.arg_regs_idx() {
-            eprintln!("\thas a specific calling convention");
+            // eprintln!("\thas a specific calling convention");
             let arg_regs = &args_regs[..vars.len()];
             for (&var, &target) in vars.iter().zip(args_regs) {
-                eprintln!("\tloading {target:?} <- {var:?}");
+                eprintln!("\tloading {reg:?} <- {var:?}", reg = Reg::from_idx(target));
                 self.move_to_specific_reg(var, target);
+            }
+            for (&clobber) in call_type.clobers_idx() {
+                self.backup_reg(clobber);
             }
         } else {
             eprintln!("\tHas no particular calling convention - moving everything to regs");
@@ -273,38 +318,28 @@ impl RegAlloc {
         std::mem::take(&mut self.opqueue)
     }
 
-    fn var_location(&self, var: Loc) -> OpTarget {
-        match self.vars[&var] {
-            VarLoc::Stack(stack) => OpTarget::Stack(stack),
-            VarLoc::Reg { reg, stack_slot } => OpTarget::Reg(reg),
-            VarLoc::Uninit => todo!(),
-        }
-    }
-
-    pub fn var_reg(&self, var: Loc) -> u8 {
-        let reg = self
+    pub fn var_reg(&self, var: Loc) -> Option<u8> {
+        self
             .regs
             .iter()
             .position(|&v| v == Some(var))
-            .expect("var_reg should only be called on vars in registers");
-        reg as u8
+            .map(|i| i as u8)
     }
 
     pub fn free(&mut self, var: Loc) {
-        let Some(&o_var) = self.vars.get(&var) else { return; };
-        match o_var {
-            VarLoc::Stack(s) => {
-                self.free_stack.push(s);
-            }
-            VarLoc::Reg { reg, stack_slot } => {
-                if let Some(slot) = stack_slot {
-                    self.free_stack.push(slot);
+        let Some(vars) = self.vars.get_mut(&var) else { return; };
+        for o_var in std::mem::take(vars) {
+            match o_var {
+                VarLoc::Stack { slot: s } => {
+                    self.free_stack.push(s);
                 }
-                self.regs[reg as usize] = None;
-                self.times[reg as usize] = 0;
-            }
-            VarLoc::Uninit => todo!(),
-        };
+                VarLoc::Reg { reg } => {
+                    self.regs[reg as usize] = None;
+                    self.times[reg as usize] = 0;
+                }
+                VarLoc::Uninit => todo!(),
+            };
+        }
         self.opqueue
             .push(AsmOp::Comment(format!("( free L_{var} )")));
         self.vars.remove(&var);
@@ -314,8 +349,60 @@ impl RegAlloc {
         self.max_stack
     }
 
-    pub(crate) fn var_loc(&self, var: usize) -> OpTarget {
-        self.vars.get(&var).expect("variable exists").clone().into()
+    pub(crate) fn apply_op(&mut self, op: &RegAllocOp) {
+        todo!()
+    }
+
+    pub(crate) fn organize_block(block: Vec<Op>, args: &[Loc]) -> Vec<AsmOp> {
+        let mut alloc = Self::new(Reg::count());
+        let mut last_occurrence = Vec::new();
+        for (i, op) in block.iter().enumerate() {
+            for var in op.vars_referenced() {
+                if var >= last_occurrence.len() {
+                    last_occurrence.resize(var + 1, usize::MAX);
+                }
+                last_occurrence[var] = i;
+            }
+            if let Op::Block { .. } = op {
+                if i != 0 {
+                    panic!("Cannot have block in another block")
+                }
+            }
+            if op.is_branch() {
+                assert_eq!(i + 1, block.len(), "can only branch at end of block")
+            }
+        }
+        let mut ret = VecDeque::with_capacity(block.len() * 2);
+
+        for (&arg, &reg) in args.iter().zip(CallType::Block.arg_regs_idx().expect("block has calling conv")) {
+            alloc.force_reg(arg, reg)
+        }
+
+        for (i, op) in block.into_iter().enumerate() {
+            for &clobbered in op.regs_clobbered() {
+                alloc.backup_reg(clobbered);
+            }
+            ret.extend(op.to_asm(&mut alloc));
+            for &clobbered in op.regs_clobbered() {
+                alloc.clobber_reg(clobbered);
+            }
+            for vref in op.vars_referenced() {
+                if last_occurrence[vref] <= i {
+                    alloc.free(vref);
+                }
+            }
+        }
+        ret.extend(alloc.take_queue());
+
+        if alloc.stack_needed() > 0 {
+            ret.push_front(AsmOp::Mov(
+                OpTarget::Reg(Reg::Rbp.idx()),
+                OpTarget::Reg(Reg::Rsp.idx()),
+            ));
+            ret.push_front(AsmOp::Push(Reg::Rbp));
+            ret.push_back(AsmOp::Pop(Reg::Rbp));
+        }
+        ret.into()
     }
 }
 

@@ -52,18 +52,14 @@ struct Routine {
 }
 
 impl Routine {
-    fn to_asm(&self, globals: &[GlobalData], config: &Config) -> String {
+    fn to_asm(&mut self, globals: &[GlobalData], config: &Config) -> String {
         let mut out = String::new();
         let mut alloc = RegAlloc::new(Reg::count());
-        let mut last_occurrence = Vec::new();
         let mut other_labels = BTreeMap::new();
+        let mut block_start = 0;
+        let mut blocks = Vec::new();
+
         for (i, op) in self.ops.iter().enumerate() {
-            for var in op.vars_referenced() {
-                if var >= last_occurrence.len() {
-                    last_occurrence.resize(var + 1, usize::MAX);
-                }
-                last_occurrence[var] = i;
-            }
             if let Op::Block { id, .. } = op {
                 if globals.len() > *id {
                     panic!("block label id conflicts with global");
@@ -71,27 +67,13 @@ impl Routine {
                 other_labels
                     .entry(*id).and_modify(|_| panic!("block label redeclared"))
                     .or_insert_with(|| block_label(*id));
+                blocks.push(block_start..i);
+                block_start = i;
             }
         }
+        blocks.push(block_start..self.ops.len());
         writeln!(out, "{name}:", name = self.name).unwrap();
-        let mut vasm = VecDeque::new();
-        for (i, op) in self.ops.iter().enumerate() {
-            let asm = op.to_asm(&mut alloc);
-            vasm.extend(asm);
-            for var in op.vars_referenced() {
-                if last_occurrence[var] <= i {
-                    alloc.free(var);
-                }
-            }
-        }
-        if alloc.stack_needed() > 0 {
-            vasm.push_front(AsmOp::Mov(
-                OpTarget::Reg(Reg::Rbp.idx()),
-                OpTarget::Reg(Reg::Rsp.idx()),
-            ));
-            vasm.push_front(AsmOp::Push(Reg::Rbp));
-            vasm.push_back(AsmOp::Pop(Reg::Rbp));
-        }
+
         let get_label = |i: usize| -> Option<&str> {
             if i < globals.len() {
                 Some(&globals[i].name)
@@ -99,8 +81,24 @@ impl Routine {
                 other_labels.get(&i).map(|x: &String| x.as_str())
             }
         };
-        for asm in vasm {
-            asm.write_op(&mut out, &get_label, config);
+
+        for (i, block) in blocks.into_iter().enumerate() {
+            let args = if i == 0 {
+                vec![]
+            } else {
+                let Op::Block { args, .. } = &self.ops[0] else {
+                    panic!("all blocks except the first must start with block op, \
+                        but this starts with {:?}", &self.ops[0]);
+                };
+                args.clone()
+            };
+            let rem = self.ops.split_off(block.len());
+            let block = std::mem::replace(&mut self.ops, rem);
+            // eprintln!("{:?}\n", &block);
+            let vasm = RegAlloc::organize_block(block, &args);
+            for asm in vasm {
+                asm.write_op(&mut out, &get_label, config);
+            }
         }
 
         writeln!(out).unwrap();
@@ -126,7 +124,7 @@ impl OpTarget {
 impl From<VarLoc> for OpTarget {
     fn from(value: VarLoc) -> Self {
         match value {
-            VarLoc::Stack(off) => OpTarget::Stack(off),
+            VarLoc::Stack { slot } => OpTarget::Stack(slot),
             VarLoc::Reg { reg, .. } => OpTarget::Reg(reg),
             VarLoc::Uninit => unimplemented!(),
         }
@@ -147,7 +145,7 @@ impl std::fmt::Display for LabelDisplay<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let l = self.0;
         match self.1 {
-            PtrMode::Address => write!(f, "qword [rip + {l}]"),
+            PtrMode::Address => write!(f, "[rip + {l}]"),
             PtrMode::MemTarget => write!(f, "qword ptr [rip + {l}]"),
             PtrMode::JmpTarget => write!(f, "{l}"),
             PtrMode::None => panic!("cannot use a label in this position"),
@@ -187,6 +185,7 @@ enum AsmOp {
     Jeq(OpTarget),
     Jmp(OpTarget),
     Test(OpTarget, OpTarget),
+    Cmp(OpTarget, OpTarget),
     Mov(OpTarget, OpTarget),
     Lea(Reg, OpTarget),
     Syscall,
@@ -206,7 +205,7 @@ impl AsmOp {
                     src = OpTargetDisplay(src, label, PtrMode::MemTarget))
             }
             AsmOp::Lea(dst, addr) => {
-                writeln!(w, "    mov {dst}, {addr}", 
+                writeln!(w, "    lea {dst}, {addr}", 
                     dst = dst.name(), 
                     addr = OpTargetDisplay(addr, label, PtrMode::Address))
             }
@@ -244,16 +243,35 @@ impl AsmOp {
                     l = OpTargetDisplay(l, label, PtrMode::Address), 
                     r = OpTargetDisplay(r, label, PtrMode::Address))
             },
+            AsmOp::Cmp(l, r) => {
+                writeln!(w, "    cmp {l}, {r}", 
+                    l = OpTargetDisplay(l, label, PtrMode::Address), 
+                    r = OpTargetDisplay(r, label, PtrMode::Address))
+            },
         }
     }
 }
 
+#[derive(Debug)]
+struct Target {
+    id: Id,
+    args: Vec<Loc>
+}
+
+#[derive(Debug)]
 enum Op {
     Call { id: Id, args: Vec<Loc> },
+    RegAllocOp(RegAllocOp),
     Load { loc: Loc, val: Val },
     Block { id: Id, args: Vec<Loc> },
-    Bne { target: Id, check: (Loc, Loc), args: Vec<Loc> },
+    Bne { check: (Loc, Loc), success: Target, fail: Target },
     Add { dst: Loc, op1: Loc, op2: Loc },
+}
+
+impl From<RegAllocOp> for Op {
+    fn from(v: RegAllocOp) -> Self {
+        Self::RegAllocOp(v)
+    }
 }
 
 impl Op {
@@ -297,17 +315,20 @@ impl Op {
                 ret.push(AsmOp::Label(block_label(*id)));
                 ret
             }
-            Op::Bne { target, check, args } => {
+            Op::Bne { check, success, fail } => {
                 let regl = alloc.move_to_reg(check.0);
                 let regr = alloc.move_to_reg(check.1);
                 let mut ret = alloc.take_queue();
                 let post_label = unique_label();
-                ret.push(AsmOp::Test(OpTarget::Reg(regl), OpTarget::Reg(regr)));
+                ret.push(AsmOp::Cmp(OpTarget::Reg(regl), OpTarget::Reg(regr)));
                 let backup = alloc.clone();
                 ret.push(AsmOp::Jeq(OpTarget::LitLabel(post_label.clone())));
-                ret.extend(alloc.setup_call(&args, CallType::Block));
-                ret.push(AsmOp::Jmp(OpTarget::Label(*target)));
+                ret.extend(alloc.setup_call(&success.args, CallType::Block));
+                ret.push(AsmOp::Jmp(OpTarget::Label(success.id)));
                 ret.push(AsmOp::Label(post_label));
+                ret.extend(alloc.setup_call(&fail.args, CallType::Block));
+                ret.push(AsmOp::Jmp(OpTarget::Label(fail.id)));
+
                 std::mem::replace(alloc, backup);
                 ret
             },
@@ -315,9 +336,13 @@ impl Op {
                 let regl = alloc.move_to_reg(*op1);
                 let regr = alloc.move_to_reg(*op2);
                 let mut ret = alloc.take_queue();
-                ret.push(AsmOp::Add(OpTarget::Reg(regl), OpTarget::Reg(regl)));
+                ret.push(AsmOp::Add(OpTarget::Reg(regl), OpTarget::Reg(regr)));
                 alloc.force_reg(*dst, regl);
                 ret
+            },
+            Op::RegAllocOp(op) => {
+                alloc.apply_op(op);
+                vec![]
             },
         }
     }
@@ -327,10 +352,26 @@ impl Op {
             Op::Call { id, args } => args.clone(),
             Op::Load { loc, val } => std::slice::from_ref(loc).into(),
             Op::Block { id, args } => args.clone(),
-            Op::Bne { target, check, args } => Vec::from_iter([check.0, check.1].into_iter()
-                .chain(args.iter().copied())),
+            Op::Bne { check, success, fail } => Vec::from_iter([check.0, check.1].into_iter()
+                .chain(success.args.iter().copied().chain(fail.args.iter().copied()))),
             Op::Add { dst, op1, op2 } => vec![*dst, *op1, *op2],
+            Op::RegAllocOp(_) => panic!("vars_referenced should not be called after reg ops added"),
         }
+    }
+
+    fn regs_clobbered(&self) -> &[u8] {
+        if let Op::Call { id, args } = self {
+            if *id == 0 {
+                return CallType::Syscall.clobers_idx();
+            }
+        }
+        &[]
+    }
+
+    /// Returns `true` if the op is a branch instruction.
+    #[must_use]
+    fn is_branch(&self) -> bool {
+        matches!(self, Self::Bne { .. })
     }
 }
 
@@ -410,6 +451,20 @@ impl CallType {
             CallType::Op2 => None,
             CallType::Op3 => None,
             CallType::Block => Some(&BLOCK_REGS),
+        }
+    }
+
+    fn clobers_idx(&self) -> &[u8] {
+        const SYSCALL_REGS: [u8; 3] = [
+            Reg::Rax.idx(),
+            Reg::Rcx.idx(),
+            Reg::R11.idx(),
+        ];
+        match self {
+            CallType::Syscall => &SYSCALL_REGS,
+            CallType::Op2 => &[],
+            CallType::Op3 => &[],
+            CallType::Block => &[],
         }
     }
 }
@@ -500,7 +555,7 @@ impl Reg {
     }
 }
 
-fn make_asm(globals: &[GlobalData], functions: &[Routine], config: &Config) -> String {
+fn make_asm(globals: &[GlobalData], functions: &mut [Routine], config: &Config) -> String {
     let mut s = String::new();
     writeln!(s, ".intel_syntax noprefix");
     writeln!(s, ".intel_mnemonic");
@@ -533,7 +588,7 @@ struct Config {
 impl Config {
     fn new() -> Self {
         Self {
-            emit_comments: false,
+            emit_comments: true,
         }
     }
 }
@@ -546,7 +601,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
     let config = Config::new();
     // syscall uses rdi rsi rdx r10 r8 r9
-    let functions = [Routine {
+    let mut functions = [Routine {
         name: "_start".into(),
         ops: vec![
             Op::Load { loc: 4, val: Val::Literal(0), },
@@ -558,21 +613,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Op::Load { loc: 3, val: Val::Literal(14), },
             Op::Call { id: 0, args: vec![0, 1, 2, 3], },
             Op::Add { dst: 7, op1: 4, op2: 1 },
-            Op::Bne { target: 1, check: (7, 6), args: vec![7] },
+            Op::Bne { check:(7,6), 
+                success: Target { id: 1, args: vec![7] },
+                fail: Target { id: 2, args: vec![] } },
+            Op::Block { id: 2, args: vec![] },
             Op::Load { loc: 4, val: Val::Literal(60), },
             Op::Load { loc: 5, val: Val::Literal(0), },
             Op::Call { id: 0, args: vec![4, 5], },
         ],
     }];
 
-    let asm = make_asm(&globals, &functions, &config);
+    let asm = make_asm(&globals, &mut functions, &config);
 
     let mut f = std::fs::File::create("out.s")?;
     f.set_len(0);
     write!(f, "{asm}");
 
     let success = std::process::Command::new("as")
-        .args(["--fatal-warnings", "-o", "out.o", "out.s"])
+        .args(["--fatal-warnings", "-g", "-o", "out.o", "out.s"])
         .spawn()?
         .wait()?
         .success();
@@ -583,7 +641,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let success = std::process::Command::new("gcc")
-        .args(["-nostdlib", "-o", "out", "out.o", "-lgcc"])
+        .args(["-nostdlib", "-g", "-o", "out", "out.o", "-lgcc"])
         .spawn()?
         .wait()?
         .success();
