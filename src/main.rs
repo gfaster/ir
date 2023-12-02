@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-// MVP FIRST!!! 
+// MVP FIRST!!!
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as FmtWrite;
@@ -19,10 +19,9 @@ enum Val {
     Literal(u64),
 }
 
-
 struct GlobalData {
     name: Box<str>,
-    data: Box<[u8]>
+    data: Box<[u8]>,
 }
 
 impl GlobalData {
@@ -37,9 +36,19 @@ impl GlobalData {
     }
 }
 
+fn unique_label() -> String {
+    static LABEL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let label = LABEL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!(".LU_{label}")
+}
+
+fn block_label(id: usize) -> String {
+    format!(".B_{id}")
+}
+
 struct Routine {
     name: Box<str>,
-    ops: Vec<Op>
+    ops: Vec<Op>,
 }
 
 impl Routine {
@@ -47,12 +56,21 @@ impl Routine {
         let mut out = String::new();
         let mut alloc = RegAlloc::new(Reg::count());
         let mut last_occurrence = Vec::new();
+        let mut other_labels = BTreeMap::new();
         for (i, op) in self.ops.iter().enumerate() {
-            for &var in op.vars_referenced() {
+            for var in op.vars_referenced() {
                 if var >= last_occurrence.len() {
                     last_occurrence.resize(var + 1, usize::MAX);
                 }
                 last_occurrence[var] = i;
+            }
+            if let Op::Block { id, .. } = op {
+                if globals.len() > *id {
+                    panic!("block label id conflicts with global");
+                }
+                other_labels
+                    .entry(*id).and_modify(|_| panic!("block label redeclared"))
+                    .or_insert_with(|| block_label(*id));
             }
         }
         writeln!(out, "{name}:", name = self.name).unwrap();
@@ -60,95 +78,182 @@ impl Routine {
         for (i, op) in self.ops.iter().enumerate() {
             let asm = op.to_asm(&mut alloc);
             vasm.extend(asm);
-            for &var in op.vars_referenced() {
+            for var in op.vars_referenced() {
                 if last_occurrence[var] <= i {
                     alloc.free(var);
                 }
             }
         }
         if alloc.stack_needed() > 0 {
-            vasm.push_front(AsmOp::Mov(OpTarget::Reg(Reg::Rbp.idx()), OpTarget::Reg(Reg::Rsp.idx())));
+            vasm.push_front(AsmOp::Mov(
+                OpTarget::Reg(Reg::Rbp.idx()),
+                OpTarget::Reg(Reg::Rsp.idx()),
+            ));
             vasm.push_front(AsmOp::Push(Reg::Rbp));
             vasm.push_back(AsmOp::Pop(Reg::Rbp));
         }
+        let get_label = |i: usize| -> Option<&str> {
+            if i < globals.len() {
+                Some(&globals[i].name)
+            } else {
+                other_labels.get(&i).map(|x: &String| x.as_str())
+            }
+        };
         for asm in vasm {
-            asm.write_op(&mut out, globals, config);
+            asm.write_op(&mut out, &get_label, config);
         }
-        
+
         writeln!(out).unwrap();
         out
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum OpTarget {
     Literal(u64),
     Reg(u8),
     Label(usize),
+    LitLabel(String),
     Stack(usize),
 }
 
 impl OpTarget {
-    fn to_display(&self, w: &mut impl std::fmt::Write, globals: &[GlobalData], ptr_load: bool) -> std::fmt::Result {
-        match self {
-            OpTarget::Literal(x) => write!(w, "{x}"),
-            OpTarget::Reg(r) => write!(w, "{}", Reg::from_idx(*r).name()),
-            OpTarget::Label(i) if ptr_load => write!(w, "qword ptr [rip + {}]", globals[*i].name),
-            OpTarget::Label(i) => write!(w, "[rip + {}]", globals[*i].name),
-            OpTarget::Stack(s) if ptr_load => write!(w, "qword ptr [rsp + {s}]"),
-            OpTarget::Stack(s) => write!(w, "[rsp + {s}]"),
+    fn from_reg(reg: u8) -> Self {
+        Self::Reg(reg)
+    }
+}
+
+impl From<VarLoc> for OpTarget {
+    fn from(value: VarLoc) -> Self {
+        match value {
+            VarLoc::Stack(off) => OpTarget::Stack(off),
+            VarLoc::Reg { reg, .. } => OpTarget::Reg(reg),
+            VarLoc::Uninit => unimplemented!(),
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy)]
+enum PtrMode {
+    Address,
+    JmpTarget,
+    MemTarget,
+    None,
+}
+
+struct LabelDisplay<'a>(&'a str, PtrMode);
+
+impl std::fmt::Display for LabelDisplay<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let l = self.0;
+        match self.1 {
+            PtrMode::Address => write!(f, "qword [rip + {l}]"),
+            PtrMode::MemTarget => write!(f, "qword ptr [rip + {l}]"),
+            PtrMode::JmpTarget => write!(f, "{l}"),
+            PtrMode::None => panic!("cannot use a label in this position"),
+        }
+    }
+}
+
+struct OpTargetDisplay<'a, 'b, T>(&'a OpTarget, &'b T , PtrMode)
+    where 
+        T: Fn(usize) -> Option<&'b str> ;
+
+impl<'a, 'b, T> std::fmt::Display for OpTargetDisplay<'a, 'b, T>
+    where 
+    T: Fn(usize) -> Option<&'b str>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let lab = &self.1;
+        match self.0 {
+            OpTarget::Literal(x) => write!(f, "{x}"),
+            OpTarget::Reg(r) => write!(f, "{}", Reg::from_idx(*r).name()),
+            OpTarget::Label(i) => write!(f, "{}", LabelDisplay(lab(*i).expect("has label declared"), self.2)),
+            OpTarget::LitLabel(i) => write!(f, "{}", LabelDisplay(&i, self.2)),
+            OpTarget::Stack(s) => write!(f, "qword ptr [rsp + {s}]"),
+            OpTarget::Stack(s) => write!(f, "[rsp + {s}]"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 enum AsmOp {
     Push(Reg),
     Pop(Reg),
-    Add(OpTarget, OpTarget, OpTarget),
+    Add(OpTarget, OpTarget),
     Comment(String),
+    Label(String),
+    Jne(OpTarget),
+    Jeq(OpTarget),
+    Jmp(OpTarget),
+    Test(OpTarget, OpTarget),
     Mov(OpTarget, OpTarget),
     Lea(Reg, OpTarget),
-    Syscall
+    Syscall,
 }
 
 impl AsmOp {
-    fn write_op(&self, w: &mut impl std::fmt::Write, globals: &[GlobalData], config: &Config) -> std::fmt::Result {
+    fn write_op<'a, 'b: 'a>(
+        &'a self,
+        w: &'_ mut impl std::fmt::Write,
+        label: &'b impl Fn(usize) -> Option<&'b str>,
+        config: &Config,
+    ) -> std::fmt::Result {
         match self {
             AsmOp::Mov(dst, src) => {
-                write!(w, "    mov ")?;
-                dst.to_display(w, globals, true)?;
-                write!(w, ", ")?;
-                src.to_display(w, globals, true)?;
-                writeln!(w)
-            },
+                writeln!(w, "    mov {dst}, {src}", 
+                    dst = OpTargetDisplay(dst, label, PtrMode::MemTarget), 
+                    src = OpTargetDisplay(src, label, PtrMode::MemTarget))
+            }
             AsmOp::Lea(dst, addr) => {
-                write!(w, "    lea {}", dst.name())?;
-                write!(w, ", ")?;
-                addr.to_display(w, globals, false)?;
-                writeln!(w)
-            },
+                writeln!(w, "    mov {dst}, {addr}", 
+                    dst = dst.name(), 
+                    addr = OpTargetDisplay(addr, label, PtrMode::Address))
+            }
             AsmOp::Syscall => writeln!(w, "    syscall"),
             AsmOp::Comment(s) if config.emit_comments => writeln!(w, "    /* {s} */"),
             AsmOp::Comment(s) => Ok(()),
             AsmOp::Push(r) => writeln!(w, "    pushq {reg}", reg = r.name()),
             AsmOp::Pop(r) => writeln!(w, "    popq {reg}", reg = r.name()),
-            AsmOp::Add(dst, op1, op2) => {
-                write!(w, "    add ")?;
-                dst.to_display(w, globals, false)?;
-                write!(w, " , ")?;
-                op1.to_display(w, globals, false)?;
-                write!(w, " , ")?;
-                op2.to_display(w, globals, false)?;
-                writeln!(w)
+            AsmOp::Add(dst, op1) => {
+                writeln!(w, "    add {dst}, {op1}", 
+                    dst = OpTargetDisplay(dst, label, PtrMode::MemTarget), 
+                    op1 = OpTargetDisplay(op1, label, PtrMode::MemTarget),
+                )
+            }
+            AsmOp::Label(l) => {
+                writeln!(w, "{l}:")
+            },
+            AsmOp::Jne(l) => {
+                writeln!(w, "    jne {dst}",
+                    dst = OpTargetDisplay(l, label, PtrMode::JmpTarget), 
+                )
+            },
+            AsmOp::Jeq(l) => {
+                writeln!(w, "    je {dst}",
+                    dst = OpTargetDisplay(l, label, PtrMode::JmpTarget), 
+                )
+            },
+            AsmOp::Jmp(l) => {
+                writeln!(w, "    jmp {dst}",
+                    dst = OpTargetDisplay(l, label, PtrMode::JmpTarget), 
+                )
+            },
+            AsmOp::Test(l, r) => {
+                writeln!(w, "    test {l}, {r}", 
+                    l = OpTargetDisplay(l, label, PtrMode::Address), 
+                    r = OpTargetDisplay(r, label, PtrMode::Address))
             },
         }
     }
 }
 
 enum Op {
-    Call{id: Id, args: Vec<Loc>},
-    Load{loc: Loc, val: Val},
+    Call { id: Id, args: Vec<Loc> },
+    Load { loc: Loc, val: Val },
+    Block { id: Id, args: Vec<Loc> },
+    Bne { target: Id, check: (Loc, Loc), args: Vec<Loc> },
+    Add { dst: Loc, op1: Loc, op2: Loc },
 }
 
 impl Op {
@@ -164,7 +269,7 @@ impl Op {
                 } else {
                     todo!()
                 }
-            },
+            }
             Op::Load { loc, val } => {
                 let ret = match val {
                     Val::GlobalLabel(g) => {
@@ -174,7 +279,7 @@ impl Op {
                         ret.push(AsmOp::Comment(format!(" ^^^ loading to L_{loc}")));
                         // eprintln!("load of {val:?} to {loc} ({reg:?}) complete");
                         ret
-                    },
+                    }
                     Val::LocalLabel(_) => todo!(),
                     Val::Literal(v) => {
                         let reg = alloc.move_to_reg(*loc);
@@ -186,25 +291,48 @@ impl Op {
                     }
                 };
                 ret
+            }
+            Op::Block { id, args } => {
+                let mut ret = alloc.setup_call(&args, CallType::Block);
+                ret.push(AsmOp::Label(block_label(*id)));
+                ret
+            }
+            Op::Bne { target, check, args } => {
+                let regl = alloc.move_to_reg(check.0);
+                let regr = alloc.move_to_reg(check.1);
+                let mut ret = alloc.take_queue();
+                let post_label = unique_label();
+                ret.push(AsmOp::Test(OpTarget::Reg(regl), OpTarget::Reg(regr)));
+                let backup = alloc.clone();
+                ret.push(AsmOp::Jeq(OpTarget::LitLabel(post_label.clone())));
+                ret.extend(alloc.setup_call(&args, CallType::Block));
+                ret.push(AsmOp::Jmp(OpTarget::Label(*target)));
+                ret.push(AsmOp::Label(post_label));
+                std::mem::replace(alloc, backup);
+                ret
+            },
+            Op::Add { dst, op1, op2 } => {
+                let regl = alloc.move_to_reg(*op1);
+                let regr = alloc.move_to_reg(*op2);
+                let mut ret = alloc.take_queue();
+                ret.push(AsmOp::Add(OpTarget::Reg(regl), OpTarget::Reg(regl)));
+                alloc.force_reg(*dst, regl);
+                ret
             },
         }
     }
 
-    fn is_var_referenced(&self, var: Loc) -> bool {
+    fn vars_referenced(&self) -> Vec<Loc> {
         match self {
-            Op::Call { id, args } => args.contains(&var),
-            Op::Load { loc, val } => *loc == var,
-        }
-    }
-
-    fn vars_referenced(&self) -> &[Loc] {
-        match self {
-            Op::Call { id, args } => &args,
-            Op::Load { loc, val } => std::slice::from_ref(loc),
+            Op::Call { id, args } => args.clone(),
+            Op::Load { loc, val } => std::slice::from_ref(loc).into(),
+            Op::Block { id, args } => args.clone(),
+            Op::Bne { target, check, args } => Vec::from_iter([check.0, check.1].into_iter()
+                .chain(args.iter().copied())),
+            Op::Add { dst, op1, op2 } => vec![*dst, *op1, *op2],
         }
     }
 }
-
 
 mod reg_alloc;
 use reg_alloc::*;
@@ -212,6 +340,7 @@ use reg_alloc::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CallType {
     Syscall,
+    Block,
     Op2,
     Op3,
 }
@@ -219,17 +348,68 @@ enum CallType {
 impl CallType {
     fn arg_regs(&self) -> Option<&[Reg]> {
         match self {
-            CallType::Syscall => Some(&[Reg::Rax, Reg::Rdi, Reg::Rsi, Reg::Rdx]),
+            CallType::Syscall => Some(&[
+                Reg::Rax,
+                Reg::Rdi,
+                Reg::Rsi,
+                Reg::Rdx,
+                Reg::R10,
+                Reg::R8,
+                Reg::R9,
+            ]),
             CallType::Op2 => None,
             CallType::Op3 => None,
+            CallType::Block => Some(&[
+                Reg::Rax,
+                Reg::Rcx,
+                Reg::Rdx,
+                Reg::Rsi,
+                Reg::Rdi,
+                Reg::Rsp,
+                Reg::Rbp,
+                Reg::R8,
+                Reg::R9,
+                Reg::R10,
+                Reg::R11,
+                Reg::R12,
+                Reg::R13,
+                Reg::R14,
+                Reg::R15,
+            ]),
         }
     }
     fn arg_regs_idx(&self) -> Option<&[u8]> {
-        const SYSCALL_REGS: [u8; 4] = [Reg::Rax.idx(), Reg::Rdi.idx(), Reg::Rsi.idx(), Reg::Rdx.idx()];
+        const SYSCALL_REGS: [u8; 7] = [
+            Reg::Rax.idx(),
+            Reg::Rdi.idx(),
+            Reg::Rsi.idx(),
+            Reg::Rdx.idx(),
+            Reg::R10.idx(),
+            Reg::R8.idx(),
+            Reg::R9.idx(),
+        ];
+        const BLOCK_REGS: [u8; 15] = [
+                Reg::Rax.idx(),
+                Reg::Rcx.idx(),
+                Reg::Rdx.idx(),
+                Reg::Rsi.idx(),
+                Reg::Rdi.idx(),
+                Reg::Rsp.idx(),
+                Reg::Rbp.idx(),
+                Reg::R8.idx(),
+                Reg::R9.idx(),
+                Reg::R10.idx(),
+                Reg::R11.idx(),
+                Reg::R12.idx(),
+                Reg::R13.idx(),
+                Reg::R14.idx(),
+                Reg::R15.idx(),
+        ];
         match self {
             CallType::Syscall => Some(&SYSCALL_REGS),
             CallType::Op2 => None,
             CallType::Op3 => None,
+            CallType::Block => Some(&BLOCK_REGS),
         }
     }
 }
@@ -275,7 +455,7 @@ impl Reg {
             12 => Self::R15,
             13 => Self::Rsp,
             14 => Self::Rbp,
-            _ => panic!("no register allocator")
+            _ => panic!("no register allocator"),
         }
     }
 
@@ -343,9 +523,7 @@ fn make_asm(globals: &[GlobalData], functions: &[Routine], config: &Config) -> S
 }
 
 macro_rules! lang {
-    () => {
-        
-    };
+    () => {};
 }
 
 struct Config {
@@ -355,38 +533,37 @@ struct Config {
 impl Config {
     fn new() -> Self {
         Self {
-            emit_comments: true,
+            emit_comments: false,
         }
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>>{
-    let globals = [
-        GlobalData {
-            name: ".hello".into(),
-            data: b"Hello, World!\n".as_slice().into(),
-        }
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let globals = [GlobalData {
+        name: ".hello".into(),
+        data: b"Hello, World!\n".as_slice().into(),
+    },
     ];
-    let config = Config {
-        emit_comments: true,
-    };
+    let config = Config::new();
     // syscall uses rdi rsi rdx r10 r8 r9
-    let functions = [
-        Routine {
-            name: "_start".into(),
-            ops: vec![
-                Op::Load { loc: 0, val: Val::Literal(1) },
-                Op::Load { loc: 1, val: Val::Literal(1) },
-                Op::Load { loc: 2, val: Val::GlobalLabel(0) },
-                Op::Load { loc: 3, val: Val::Literal(14) },
-                Op::Call { id: 0, args: vec![0, 1, 2, 3] },
-                Op::Load { loc: 4, val: Val::Literal(60) },
-                Op::Load { loc: 5, val: Val::Literal(0) },
-                Op::Call { id: 0, args: vec![4, 5] }
-            ],
-        }
-    ];
-
+    let functions = [Routine {
+        name: "_start".into(),
+        ops: vec![
+            Op::Load { loc: 4, val: Val::Literal(0), },
+            Op::Block { id: 1, args: vec![4] },
+            Op::Load { loc: 6, val: Val::Literal(5), },
+            Op::Load { loc: 0, val: Val::Literal(1), },
+            Op::Load { loc: 1, val: Val::Literal(1), },
+            Op::Load { loc: 2, val: Val::GlobalLabel(0), },
+            Op::Load { loc: 3, val: Val::Literal(14), },
+            Op::Call { id: 0, args: vec![0, 1, 2, 3], },
+            Op::Add { dst: 7, op1: 4, op2: 1 },
+            Op::Bne { target: 1, check: (7, 6), args: vec![7] },
+            Op::Load { loc: 4, val: Val::Literal(60), },
+            Op::Load { loc: 5, val: Val::Literal(0), },
+            Op::Call { id: 0, args: vec![4, 5], },
+        ],
+    }];
 
     let asm = make_asm(&globals, &functions, &config);
 
@@ -395,7 +572,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>>{
     write!(f, "{asm}");
 
     let success = std::process::Command::new("as")
-        .args(["--fatal-warnings", "-o", "out.o", "out.s"]).spawn()?.wait()?.success();
+        .args(["--fatal-warnings", "-o", "out.o", "out.s"])
+        .spawn()?
+        .wait()?
+        .success();
 
     if !success {
         eprintln!("assembling failed");
@@ -403,8 +583,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>>{
     }
 
     let success = std::process::Command::new("gcc")
-        .args(["-nostdlib", "-o", "out", "out.o", "-lgcc"]).spawn()?.wait()?.success();
-        // .args(["-nostdlib", "-ffreestanding", "-o", "out", "out.o", "-lgcc"]).spawn()?.wait()?.success();
+        .args(["-nostdlib", "-o", "out", "out.o", "-lgcc"])
+        .spawn()?
+        .wait()?
+        .success();
+    // .args(["-nostdlib", "-ffreestanding", "-o", "out", "out.o", "-lgcc"]).spawn()?.wait()?.success();
 
     if !success {
         eprintln!("linking failed");
