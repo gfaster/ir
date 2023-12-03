@@ -6,6 +6,12 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::io::Write;
 
+// mod reorder;
+// use reorder::*;
+
+mod parse;
+use parse::*;
+
 /// symbol id currently global scope and unique
 type Id = usize;
 
@@ -52,7 +58,7 @@ struct Routine {
 }
 
 impl Routine {
-    fn to_asm(&mut self, globals: &[GlobalData], config: &Config) -> String {
+    fn to_asm(&mut self, globals: &BTreeMap<usize, GlobalData>, config: &Config) -> String {
         let mut out = String::new();
         let mut alloc = RegAlloc::new(Reg::count());
         let mut other_labels = BTreeMap::new();
@@ -75,11 +81,14 @@ impl Routine {
         writeln!(out, "{name}:", name = self.name).unwrap();
 
         let get_label = |i: usize| -> Option<&str> {
-            if i < globals.len() {
-                Some(&globals[i].name)
-            } else {
-                other_labels.get(&i).map(|x: &String| x.as_str())
-            }
+            globals.get(&i).map_or_else(|| other_labels.get(&i).map(
+                |x: &String| x.as_str()),
+                |g| Some(&globals[&i].name))
+            // if i < globals.len() {
+            //     Some(&globals[&i].name)
+            // } else {
+            //     other_labels.get(&i).map(|x: &String| x.as_str())
+            // }
         };
 
         for (i, block) in blocks.into_iter().enumerate() {
@@ -265,6 +274,7 @@ enum Op {
     Load { loc: Loc, val: Val },
     Block { id: Id, args: Vec<Loc> },
     Bne { check: (Loc, Loc), success: Target, fail: Target },
+    Jmp { target: Target },
     Add { dst: Loc, op1: Loc, op2: Loc },
 }
 
@@ -332,6 +342,11 @@ impl Op {
                 std::mem::replace(alloc, backup);
                 ret
             },
+            Op::Jmp { target } => {
+                let mut ret = alloc.setup_call(&target.args, CallType::Block);
+                ret.push(AsmOp::Jmp(OpTarget::Label(target.id)));
+                ret
+            },
             Op::Add { dst, op1, op2 } => {
                 let regl = alloc.move_to_reg(*op1);
                 let regr = alloc.move_to_reg(*op2);
@@ -355,6 +370,7 @@ impl Op {
             Op::Bne { check, success, fail } => Vec::from_iter([check.0, check.1].into_iter()
                 .chain(success.args.iter().copied().chain(fail.args.iter().copied()))),
             Op::Add { dst, op1, op2 } => vec![*dst, *op1, *op2],
+            Op::Jmp { target } => Vec::from(&target.args[..]),
             Op::RegAllocOp(_) => panic!("vars_referenced should not be called after reg ops added"),
         }
     }
@@ -555,7 +571,7 @@ impl Reg {
     }
 }
 
-fn make_asm(globals: &[GlobalData], functions: &mut [Routine], config: &Config) -> String {
+fn make_asm(globals: &BTreeMap<usize, GlobalData>, functions: &mut [Routine], config: &Config) -> String {
     let mut s = String::new();
     writeln!(s, ".intel_syntax noprefix");
     writeln!(s, ".intel_mnemonic");
@@ -570,7 +586,7 @@ fn make_asm(globals: &[GlobalData], functions: &mut [Routine], config: &Config) 
 
     writeln!(s);
     writeln!(s, ".section .rodata");
-    for global in globals {
+    for (_id, global) in globals {
         write!(s, "{}", global.to_asm()).unwrap();
     }
     writeln!(s, ".section \".note.GNU-stack\"");
@@ -594,34 +610,39 @@ impl Config {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let globals = [GlobalData {
-        name: ".hello".into(),
-        data: b"Hello, World!\n".as_slice().into(),
-    },
-    ];
-    let config = Config::new();
+    // let globals = [GlobalData {
+    //     name: ".hello".into(),
+    //     data: b"Hello, World!\n".as_slice().into(),
+    // },
+    // ];
     // syscall uses rdi rsi rdx r10 r8 r9
-    let mut functions = [Routine {
-        name: "_start".into(),
-        ops: vec![
-            Op::Load { loc: 4, val: Val::Literal(0), },
-            Op::Block { id: 1, args: vec![4] },
-            Op::Load { loc: 6, val: Val::Literal(5), },
-            Op::Load { loc: 0, val: Val::Literal(1), },
-            Op::Load { loc: 1, val: Val::Literal(1), },
-            Op::Load { loc: 2, val: Val::GlobalLabel(0), },
-            Op::Load { loc: 3, val: Val::Literal(14), },
-            Op::Call { id: 0, args: vec![0, 1, 2, 3], },
-            Op::Add { dst: 7, op1: 4, op2: 1 },
-            Op::Bne { check:(7,6), 
-                success: Target { id: 1, args: vec![7] },
-                fail: Target { id: 2, args: vec![] } },
-            Op::Block { id: 2, args: vec![] },
-            Op::Load { loc: 4, val: Val::Literal(60), },
-            Op::Load { loc: 5, val: Val::Literal(0), },
-            Op::Call { id: 0, args: vec![4, 5], },
-        ],
-    }];
+    // let mut functions = [Routine {
+    //     name: "_start".into(),
+    //     ops: vec![
+    //         Op::Load { loc: 4, val: Val::Literal(0), },
+    //         Op::Block { id: 1, args: vec![4] },
+    //         Op::Load { loc: 6, val: Val::Literal(5), },
+    //         Op::Load { loc: 0, val: Val::Literal(1), },
+    //         Op::Load { loc: 1, val: Val::Literal(1), },
+    //         Op::Load { loc: 2, val: Val::GlobalLabel(0), },
+    //         Op::Load { loc: 3, val: Val::Literal(14), },
+    //         Op::Call { id: 0, args: vec![0, 1, 2, 3], },
+    //         Op::Add { dst: 7, op1: 4, op2: 1 },
+    //         Op::Bne { check:(7,6), 
+    //             success: Target { id: 1, args: vec![7] },
+    //             fail: Target { id: 2, args: vec![] } },
+    //         Op::Block { id: 2, args: vec![] },
+    //         Op::Load { loc: 4, val: Val::Literal(60), },
+    //         Op::Load { loc: 5, val: Val::Literal(0), },
+    //         Op::Call { id: 0, args: vec![4, 5], },
+    //     ],
+    // }];
+
+    let config = Config::new();
+
+    let mut input = parse::Parser::new_file("./input.ll")?;
+    let (functions, mut globals) = input.parse();
+    let mut functions = [functions];
 
     let asm = make_asm(&globals, &mut functions, &config);
 

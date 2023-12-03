@@ -318,6 +318,12 @@ impl RegAlloc {
         std::mem::take(&mut self.opqueue)
     }
 
+    /// get the var held in reg
+    pub fn reg_var(&self, reg: u8) -> Option<Loc> {
+        self.regs[reg as usize]
+    }
+
+    /// get the first reg that holds var
     pub fn var_reg(&self, var: Loc) -> Option<u8> {
         self
             .regs
@@ -356,6 +362,7 @@ impl RegAlloc {
     pub(crate) fn organize_block(block: Vec<Op>, args: &[Loc]) -> Vec<AsmOp> {
         let mut alloc = Self::new(Reg::count());
         let mut last_occurrence = Vec::new();
+        // validate block and determine lifetimes
         for (i, op) in block.iter().enumerate() {
             for var in op.vars_referenced() {
                 if var >= last_occurrence.len() {
@@ -380,7 +387,11 @@ impl RegAlloc {
 
         for (i, op) in block.into_iter().enumerate() {
             for &clobbered in op.regs_clobbered() {
-                alloc.backup_reg(clobbered);
+                if let Some(var) = alloc.reg_var(clobbered) {
+                    if last_occurrence[var] >= i {
+                        alloc.backup_reg(clobbered);
+                    }
+                }
             }
             ret.extend(op.to_asm(&mut alloc));
             for &clobbered in op.regs_clobbered() {
