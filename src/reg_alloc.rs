@@ -1,6 +1,8 @@
 use crate::Loc;
 use crate::Op;
+use crate::OpInner;
 use crate::Reg;
+use crate::new_block_id;
 use crate::{AsmOp, CallType, OpTarget};
 
 use std::collections::BTreeMap;
@@ -370,7 +372,7 @@ impl RegAlloc {
                 }
                 last_occurrence[var] = i;
             }
-            if let Op::Block { .. } = op {
+            if let OpInner::Block { .. } = op.inner {
                 if i != 0 {
                     panic!("Cannot have block in another block")
                 }
@@ -388,7 +390,7 @@ impl RegAlloc {
         for (i, op) in block.into_iter().enumerate() {
             for &clobbered in op.regs_clobbered() {
                 if let Some(var) = alloc.reg_var(clobbered) {
-                    if last_occurrence[var] >= i {
+                    if last_occurrence[var] >= i + 1 {
                         alloc.backup_reg(clobbered);
                     }
                 }
@@ -413,6 +415,9 @@ impl RegAlloc {
             ret.push_front(AsmOp::Push(Reg::Rbp));
             ret.push_back(AsmOp::Pop(Reg::Rbp));
         }
+        let block_id = new_block_id();
+        ret.push_front(AsmOp::BlockBegin(block_id));
+        ret.push_back(AsmOp::BlockEnd(block_id));
         ret.into()
     }
 }

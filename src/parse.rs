@@ -1,6 +1,6 @@
 use std::{ops::Range, collections::{HashMap, BTreeMap}};
 
-use crate::{Op, Routine, Target, unique_label, Val, GlobalData};
+use crate::{OpInner, Routine, Target, unique_label, Val, GlobalData, Op};
 
 struct IdentMap(HashMap<Box<str>, (usize, bool)>, usize);
 impl IdentMap {
@@ -178,12 +178,12 @@ macro_rules! parse_panic {
 }
 
 enum Statement {
-    Op(Op),
+    Op(OpInner),
     Global(GlobalData)
 }
 
-impl From<Op> for Statement {
-    fn from(v: Op) -> Self {
+impl From<OpInner> for Statement {
+    fn from(v: OpInner) -> Self {
         Self::Op(v)
     }
 }
@@ -391,7 +391,11 @@ impl Parser {
             let tok_str = &self.buf[tok.span.clone()];
             if let Some(op) = OpType::is_op_key(&tok, &self.buf) {
                 match self.parse_op(&mut idents, op, None) {
-                    Statement::Op(op) => ops.push(op),
+                    Statement::Op(op) => ops.push(Op {
+                        inner: op,
+                        fileno: 0,
+                        line: self.line as u32,
+                    }),
                     Statement::Global(global) => {
                         globals.push(global)
                     },
@@ -404,7 +408,11 @@ impl Parser {
                     parse_panic!(self, "expected operation");
                 };
                 match self.parse_op(&mut idents, op_type, Some(id)) {
-                    Statement::Op(op) => ops.push(op),
+                    Statement::Op(op) => ops.push(Op {
+                        inner: op,
+                        fileno: 0,
+                        line: self.line as u32,
+                    }),
                     Statement::Global(_) => parse_panic!(self, "should only be able to have globals without assign"),
                 }
             }
@@ -453,13 +461,13 @@ impl Parser {
                 self.expect(TokenKind::Comma);
                 let op2 = self.ident_id(idents);
                 let dst = self.expect_dst(dst);
-                Op::Add { dst, op1, op2 }
+                OpInner::Add { dst, op1, op2 }
             },
             OpType::Jmp => {
                 self.expect_keyword("label");
                 let id = self.ident_id_decl(idents);
                 let args = self.parse_args(idents);
-                Op::Jmp { target: Target { id, args } }
+                OpInner::Jmp { target: Target { id, args } }
             },
             OpType::Br => {
                 let lhs = self.ident_id(idents);
@@ -477,18 +485,18 @@ impl Parser {
                     id: self.ident_id_decl(idents),
                     args: self.parse_args(idents),
                 };
-                Op::Bne { check: (lhs, rhs), success, fail }
+                OpInner::Bne { check: (lhs, rhs), success, fail }
             },
             OpType::Load => {
                 let loc = self.ident_id_assign(idents);
                 self.expect(TokenKind::Comma);
                 let val = self.expect_val(idents);
-                Op::Load { loc, val }
+                OpInner::Load { loc, val }
             },
             OpType::Label => {
                 let id = self.ident_id_assign(idents);
                 let args = self.parse_args_assign(idents);
-                Op::Block { id, args }
+                OpInner::Block { id, args }
             },
             OpType::Global => {
                 let tok = self.expect(TokenKind::Ident);
@@ -500,7 +508,7 @@ impl Parser {
             OpType::Call => {
                 self.expect_keyword("syscall");
                 let args = self.parse_args(idents);
-                Op::Call { id: 0, args }
+                OpInner::Call { id: 0, args }
             },
         }.into()
     }

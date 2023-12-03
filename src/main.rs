@@ -49,7 +49,17 @@ fn unique_label() -> String {
 }
 
 fn block_label(id: usize) -> String {
-    format!(".B_{id}")
+    format!(".LB_{id}")
+}
+
+fn new_block_id() -> u32 {
+    static LABEL_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    LABEL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn new_function_id() -> u32 {
+    static LABEL_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    LABEL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 struct Routine {
@@ -66,7 +76,7 @@ impl Routine {
         let mut blocks = Vec::new();
 
         for (i, op) in self.ops.iter().enumerate() {
-            if let Op::Block { id, .. } = op {
+            if let OpInner::Block { id, .. } = &op.inner {
                 if globals.len() > *id {
                     panic!("block label id conflicts with global");
                 }
@@ -91,11 +101,13 @@ impl Routine {
             // }
         };
 
+        let func_id = new_function_id();
+        AsmOp::FuncBegin(func_id).write_op(&mut out, &get_label, config);
         for (i, block) in blocks.into_iter().enumerate() {
             let args = if i == 0 {
                 vec![]
             } else {
-                let Op::Block { args, .. } = &self.ops[0] else {
+                let OpInner::Block { args, .. } = &self.ops[0].inner else {
                     panic!("all blocks except the first must start with block op, \
                         but this starts with {:?}", &self.ops[0]);
                 };
@@ -109,6 +121,7 @@ impl Routine {
                 asm.write_op(&mut out, &get_label, config);
             }
         }
+        AsmOp::FuncEnd(func_id).write_op(&mut out, &get_label, config);
 
         writeln!(out).unwrap();
         out
@@ -185,6 +198,12 @@ impl<'a, 'b, T> std::fmt::Display for OpTargetDisplay<'a, 'b, T>
 
 #[derive(Debug, Clone)]
 enum AsmOp {
+    File(String, u32),
+    Loc(u32),
+    FuncBegin(u32),
+    FuncEnd(u32),
+    BlockBegin(u32),
+    BlockEnd(u32),
     Push(Reg),
     Pop(Reg),
     Add(OpTarget, OpTarget),
@@ -257,6 +276,29 @@ impl AsmOp {
                     l = OpTargetDisplay(l, label, PtrMode::Address), 
                     r = OpTargetDisplay(r, label, PtrMode::Address))
             },
+            AsmOp::File(name, id) => {
+                writeln!(w, ".file {id} {name:?}")
+            },
+            AsmOp::Loc(line) => {
+                if config.emit_debug_syms {
+                    writeln!(w, ".loc 0 {line}")?
+                }
+                Ok(())
+            },
+            AsmOp::FuncBegin(id) => writeln!(w, ".LFB{id}:"),
+            AsmOp::FuncEnd(id) => writeln!(w, ".LFE{id}:"),
+            AsmOp::BlockBegin(id) => {
+                if config.emit_debug_syms {
+                    writeln!(w, ".LBB{id}:")?;
+                }
+                Ok(())
+            },
+            AsmOp::BlockEnd(id) => {
+                if config.emit_debug_syms {
+                    writeln!(w, ".LBE{id}:")?;
+                }
+                Ok(())
+            },
         }
     }
 }
@@ -268,7 +310,14 @@ struct Target {
 }
 
 #[derive(Debug)]
-enum Op {
+struct Op {
+    inner: OpInner,
+    fileno: u32,
+    line: u32,
+}
+
+#[derive(Debug)]
+enum OpInner {
     Call { id: Id, args: Vec<Loc> },
     RegAllocOp(RegAllocOp),
     Load { loc: Loc, val: Val },
@@ -278,7 +327,7 @@ enum Op {
     Add { dst: Loc, op1: Loc, op2: Loc },
 }
 
-impl From<RegAllocOp> for Op {
+impl From<RegAllocOp> for OpInner {
     fn from(v: RegAllocOp) -> Self {
         Self::RegAllocOp(v)
     }
@@ -286,49 +335,46 @@ impl From<RegAllocOp> for Op {
 
 impl Op {
     fn to_asm(&self, alloc: &mut RegAlloc) -> Vec<AsmOp> {
-        match self {
-            Op::Call { id, args } => {
+        let mut ret = Vec::with_capacity(10);
+        ret.push(AsmOp::Loc(self.line));
+        match &self.inner {
+            OpInner::Call { id, args } => {
                 if *id == 0 {
-                    let mut ret = alloc.setup_call(&args, CallType::Syscall);
+                    ret.extend(alloc.setup_call(&args, CallType::Syscall));
                     ret.push(AsmOp::Syscall);
                     ret.push(AsmOp::Comment(format!("^^^ has arguments {args:?}")));
                     // eprintln!("syscall complete");
-                    ret
                 } else {
                     todo!()
                 }
             }
-            Op::Load { loc, val } => {
-                let ret = match val {
+            OpInner::Load { loc, val } => {
+                match val {
                     Val::GlobalLabel(g) => {
                         let reg = alloc.move_to_reg(*loc);
-                        let mut ret = alloc.take_queue();
+                        ret.extend_from_slice(&alloc.take_queue());
                         ret.push(AsmOp::Lea(Reg::from_idx(reg), OpTarget::Label(*g)));
                         ret.push(AsmOp::Comment(format!(" ^^^ loading to L_{loc}")));
                         // eprintln!("load of {val:?} to {loc} ({reg:?}) complete");
-                        ret
                     }
                     Val::LocalLabel(_) => todo!(),
                     Val::Literal(v) => {
                         let reg = alloc.move_to_reg(*loc);
-                        let mut ret = alloc.take_queue();
+                        ret.extend_from_slice(&alloc.take_queue());
                         ret.push(AsmOp::Mov(OpTarget::Reg(reg), OpTarget::Literal(*v)));
                         ret.push(AsmOp::Comment(format!(" ^^^ loading literal to L_{loc}")));
                         // eprintln!("load of {val:?} to {loc} ({reg:?}) complete");
-                        ret
                     }
                 };
-                ret
             }
-            Op::Block { id, args } => {
-                let mut ret = alloc.setup_call(&args, CallType::Block);
+            OpInner::Block { id, args } => {
+                ret.extend_from_slice(&alloc.setup_call(&args, CallType::Block));
                 ret.push(AsmOp::Label(block_label(*id)));
-                ret
             }
-            Op::Bne { check, success, fail } => {
+            OpInner::Bne { check, success, fail } => {
                 let regl = alloc.move_to_reg(check.0);
                 let regr = alloc.move_to_reg(check.1);
-                let mut ret = alloc.take_queue();
+                ret.extend_from_slice(&alloc.take_queue());
                 let post_label = unique_label();
                 ret.push(AsmOp::Cmp(OpTarget::Reg(regl), OpTarget::Reg(regr)));
                 let backup = alloc.clone();
@@ -340,43 +386,40 @@ impl Op {
                 ret.push(AsmOp::Jmp(OpTarget::Label(fail.id)));
 
                 std::mem::replace(alloc, backup);
-                ret
             },
-            Op::Jmp { target } => {
-                let mut ret = alloc.setup_call(&target.args, CallType::Block);
+            OpInner::Jmp { target } => {
+                ret.extend_from_slice(&alloc.setup_call(&target.args, CallType::Block));
                 ret.push(AsmOp::Jmp(OpTarget::Label(target.id)));
-                ret
             },
-            Op::Add { dst, op1, op2 } => {
+            OpInner::Add { dst, op1, op2 } => {
                 let regl = alloc.move_to_reg(*op1);
                 let regr = alloc.move_to_reg(*op2);
-                let mut ret = alloc.take_queue();
+                ret.extend_from_slice(&alloc.take_queue());
                 ret.push(AsmOp::Add(OpTarget::Reg(regl), OpTarget::Reg(regr)));
                 alloc.force_reg(*dst, regl);
-                ret
             },
-            Op::RegAllocOp(op) => {
+            OpInner::RegAllocOp(op) => {
                 alloc.apply_op(op);
-                vec![]
             },
         }
+        ret
     }
 
     fn vars_referenced(&self) -> Vec<Loc> {
-        match self {
-            Op::Call { id, args } => args.clone(),
-            Op::Load { loc, val } => std::slice::from_ref(loc).into(),
-            Op::Block { id, args } => args.clone(),
-            Op::Bne { check, success, fail } => Vec::from_iter([check.0, check.1].into_iter()
+        match &self.inner {
+            OpInner::Call { id, args } => args.clone(),
+            OpInner::Load { loc, val } => std::slice::from_ref(loc).into(),
+            OpInner::Block { id, args } => args.clone(),
+            OpInner::Bne { check, success, fail } => Vec::from_iter([check.0, check.1].into_iter()
                 .chain(success.args.iter().copied().chain(fail.args.iter().copied()))),
-            Op::Add { dst, op1, op2 } => vec![*dst, *op1, *op2],
-            Op::Jmp { target } => Vec::from(&target.args[..]),
-            Op::RegAllocOp(_) => panic!("vars_referenced should not be called after reg ops added"),
+            OpInner::Add { dst, op1, op2 } => vec![*dst, *op1, *op2],
+            OpInner::Jmp { target } => Vec::from(&target.args[..]),
+            OpInner::RegAllocOp(_) => panic!("vars_referenced should not be called after reg ops added"),
         }
     }
 
     fn regs_clobbered(&self) -> &[u8] {
-        if let Op::Call { id, args } = self {
+        if let OpInner::Call { id, args } = &self.inner {
             if *id == 0 {
                 return CallType::Syscall.clobers_idx();
             }
@@ -387,7 +430,7 @@ impl Op {
     /// Returns `true` if the op is a branch instruction.
     #[must_use]
     fn is_branch(&self) -> bool {
-        matches!(self, Self::Bne { .. })
+        matches!(self.inner, OpInner::Bne { .. })
     }
 }
 
@@ -578,6 +621,7 @@ fn make_asm(globals: &BTreeMap<usize, GlobalData>, functions: &mut [Routine], co
     writeln!(s);
 
     writeln!(s, ".section .text");
+    writeln!(s, ".file 0 \"input.ll\"");
     writeln!(s);
     for routine in functions {
         writeln!(s, "    .globl {}", routine.name).unwrap();
@@ -598,13 +642,15 @@ macro_rules! lang {
 }
 
 struct Config {
+    emit_debug_syms: bool,
     emit_comments: bool,
 }
 
 impl Config {
     fn new() -> Self {
         Self {
-            emit_comments: true,
+            emit_comments: false,
+            emit_debug_syms: true,
         }
     }
 }
