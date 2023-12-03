@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::io::Write;
+use std::rc::Rc;
 
 // mod reorder;
 // use reorder::*;
@@ -14,6 +15,8 @@ use parse::*;
 
 /// symbol id currently global scope and unique
 type Id = usize;
+
+type VarMap = BTreeMap<Loc, Box<str>>;
 
 /// Id of a local
 type Loc = usize;
@@ -68,9 +71,8 @@ struct Routine {
 }
 
 impl Routine {
-    fn to_asm(&mut self, globals: &BTreeMap<usize, GlobalData>, config: &Config) -> String {
+    fn to_asm(&mut self, globals: &BTreeMap<usize, GlobalData>, vars: &Rc<VarMap>, config: &Config) -> String {
         let mut out = String::new();
-        let mut alloc = RegAlloc::new(Reg::count());
         let mut other_labels = BTreeMap::new();
         let mut block_start = 0;
         let mut blocks = Vec::new();
@@ -116,7 +118,7 @@ impl Routine {
             let rem = self.ops.split_off(block.len());
             let block = std::mem::replace(&mut self.ops, rem);
             // eprintln!("{:?}\n", &block);
-            let vasm = RegAlloc::organize_block(block, &args);
+            let vasm = RegAlloc::organize_block(block, &args, &vars);
             for asm in vasm {
                 asm.write_op(&mut out, &get_label, config);
             }
@@ -196,6 +198,14 @@ impl<'a, 'b, T> std::fmt::Display for OpTargetDisplay<'a, 'b, T>
     }
 }
 
+struct VarArray<'a, 'b>(&'a[Loc], &'b VarMap);
+
+impl<'a, 'b> std::fmt::Debug for VarArray<'a, 'b> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.0.iter().map(|loc| self.1.get(loc).map_or("unknown var", |b| &b))).finish()
+    }
+}
+
 #[derive(Debug, Clone)]
 enum AsmOp {
     File(String, u32),
@@ -208,6 +218,7 @@ enum AsmOp {
     Pop(Reg),
     Add(OpTarget, OpTarget),
     Comment(String),
+    // VarComment(Box<dyn FnOnce(&VarMap) -> String + Clone>),
     Label(String),
     Jne(OpTarget),
     Jeq(OpTarget),
@@ -334,7 +345,7 @@ impl From<RegAllocOp> for OpInner {
 }
 
 impl Op {
-    fn to_asm(&self, alloc: &mut RegAlloc) -> Vec<AsmOp> {
+    fn to_asm(&self, alloc: &mut RegAlloc, vars: &Rc<VarMap>) -> Vec<AsmOp> {
         let mut ret = Vec::with_capacity(10);
         ret.push(AsmOp::Loc(self.line));
         match &self.inner {
@@ -342,7 +353,7 @@ impl Op {
                 if *id == 0 {
                     ret.extend(alloc.setup_call(&args, CallType::Syscall));
                     ret.push(AsmOp::Syscall);
-                    ret.push(AsmOp::Comment(format!("^^^ has arguments {args:?}")));
+                    ret.push(AsmOp::Comment(format!("^^^ has arguments {:?}", VarArray(&args, &vars))));
                     // eprintln!("syscall complete");
                 } else {
                     todo!()
@@ -354,7 +365,7 @@ impl Op {
                         let reg = alloc.move_to_reg(*loc);
                         ret.extend_from_slice(&alloc.take_queue());
                         ret.push(AsmOp::Lea(Reg::from_idx(reg), OpTarget::Label(*g)));
-                        ret.push(AsmOp::Comment(format!(" ^^^ loading to L_{loc}")));
+                        ret.push(AsmOp::Comment(format!(" ^^^ loading to {}", vars[loc])));
                         // eprintln!("load of {val:?} to {loc} ({reg:?}) complete");
                     }
                     Val::LocalLabel(_) => todo!(),
@@ -362,7 +373,7 @@ impl Op {
                         let reg = alloc.move_to_reg(*loc);
                         ret.extend_from_slice(&alloc.take_queue());
                         ret.push(AsmOp::Mov(OpTarget::Reg(reg), OpTarget::Literal(*v)));
-                        ret.push(AsmOp::Comment(format!(" ^^^ loading literal to L_{loc}")));
+                        ret.push(AsmOp::Comment(format!(" ^^^ loading literal to {}", vars[loc])));
                         // eprintln!("load of {val:?} to {loc} ({reg:?}) complete");
                     }
                 };
@@ -377,6 +388,7 @@ impl Op {
                 ret.extend_from_slice(&alloc.take_queue());
                 let post_label = unique_label();
                 ret.push(AsmOp::Cmp(OpTarget::Reg(regl), OpTarget::Reg(regr)));
+                ret.push(AsmOp::Comment(format!(" ^^^ cmp {} with {}", vars[&check.0], vars[&check.1])));
                 let backup = alloc.clone();
                 ret.push(AsmOp::Jeq(OpTarget::LitLabel(post_label.clone())));
                 ret.extend(alloc.setup_call(&success.args, CallType::Block));
@@ -396,6 +408,7 @@ impl Op {
                 let regr = alloc.move_to_reg(*op2);
                 ret.extend_from_slice(&alloc.take_queue());
                 ret.push(AsmOp::Add(OpTarget::Reg(regl), OpTarget::Reg(regr)));
+                ret.push(AsmOp::Comment(format!(" ^^^ {} := {} + {}", vars[dst], vars[op1], vars[op2])));
                 alloc.force_reg(*dst, regl);
             },
             OpInner::RegAllocOp(op) => {
@@ -416,6 +429,13 @@ impl Op {
             OpInner::Jmp { target } => Vec::from(&target.args[..]),
             OpInner::RegAllocOp(_) => panic!("vars_referenced should not be called after reg ops added"),
         }
+    }
+
+    fn vars_clobbered(&self) -> &[Loc] {
+        if let OpInner::Add { op1, .. } = &self.inner {
+            return std::slice::from_ref(op1)
+        }
+        &[]
     }
 
     fn regs_clobbered(&self) -> &[u8] {
@@ -626,7 +646,7 @@ impl Reg {
     }
 }
 
-fn make_asm(globals: &BTreeMap<usize, GlobalData>, functions: &mut [Routine], config: &Config) -> String {
+fn make_asm(globals: &BTreeMap<usize, GlobalData>, vars: Rc<VarMap>, functions: &mut [Routine], config: &Config) -> String {
     let mut s = String::new();
     writeln!(s, ".intel_syntax noprefix");
     writeln!(s, ".intel_mnemonic");
@@ -637,7 +657,7 @@ fn make_asm(globals: &BTreeMap<usize, GlobalData>, functions: &mut [Routine], co
     writeln!(s);
     for routine in functions {
         writeln!(s, "    .globl {}", routine.name).unwrap();
-        write!(s, "{}", routine.to_asm(&globals, config)).unwrap();
+        write!(s, "{}", routine.to_asm(&globals, &vars, config)).unwrap();
     }
 
     writeln!(s);
@@ -662,7 +682,7 @@ impl Config {
     fn new() -> Self {
         Self {
             emit_comments: true,
-            emit_debug_syms: false,
+            emit_debug_syms: true,
         }
     }
 }
@@ -699,10 +719,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::new();
 
     let mut input = parse::Parser::new_file("./input.ll")?;
-    let (functions, mut globals) = input.parse();
-    let mut functions = [functions];
+    let ParsedFile { routine, vars, globals } = input.parse();
+    let mut functions = [routine];
 
-    let asm = make_asm(&globals, &mut functions, &config);
+    let asm = make_asm(&globals, vars, &mut functions, &config);
 
     let mut f = std::fs::File::create("out.s")?;
     f.set_len(0);

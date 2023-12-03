@@ -1,4 +1,4 @@
-use std::{ops::Range, collections::{HashMap, BTreeMap}};
+use std::{ops::Range, collections::{HashMap, BTreeMap}, rc::Rc};
 
 use crate::{OpInner, Routine, Target, unique_label, Val, GlobalData, Op};
 
@@ -35,6 +35,9 @@ impl IdentMap {
                 panic!("identifier {key:?} was never initialized")
             }
         }
+    }
+    fn invert(self) -> BTreeMap<usize, Box<str>> {
+        self.0.into_iter().map(|(k, (v, _init))| (v, k)).collect()
     }
 }
 
@@ -207,6 +210,12 @@ pub(crate) struct Parser {
     line: usize,
     buf: String,
     off: usize,
+}
+
+pub(crate) struct ParsedFile {
+    pub routine: Routine,
+    pub vars: Rc<BTreeMap<usize, Box<str>>>,
+    pub globals: BTreeMap<usize, GlobalData>
 }
 
 impl Parser {
@@ -383,7 +392,7 @@ impl Parser {
         self.off += off + 1;
     }
 
-    pub fn parse(&mut self) -> (Routine, BTreeMap<usize, GlobalData>) {
+    pub fn parse(&mut self) -> ParsedFile {
         let mut idents = IdentMap::new();
         self.expect(TokenKind::Define);
         let name_tok = self.expect(TokenKind::Ident);
@@ -429,7 +438,11 @@ impl Parser {
         self.expect(TokenKind::CloseCurly);
         let globals = globals.into_iter().map(|g| (idents.lookup(&g.name).expect("previously declared"), g)).collect();
         idents.assert_all_initialized(&globals);
-        (Routine { name: name.into(), ops }, globals)
+        ParsedFile {
+            routine: Routine { name: name.into(), ops },
+            vars: Rc::new(idents.invert()),
+            globals,
+        }
     }
 
     fn lookup_ident(&self, idents: &IdentMap, tok: &Token) -> usize {
