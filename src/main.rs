@@ -10,6 +10,8 @@ use std::rc::Rc;
 // mod reorder;
 // use reorder::*;
 
+// mod assign_lit;
+
 mod parse;
 use parse::*;
 
@@ -37,8 +39,12 @@ impl GlobalData {
     fn to_asm(&self) -> String {
         let mut out = String::new();
         writeln!(out, "{name}:", name = self.name).unwrap();
-        for byte in self.data.iter() {
-            writeln!(out, ".byte {byte}").unwrap();
+        if self.data.is_ascii() {
+            writeln!(out, ".ascii \"{}\"", self.data.escape_ascii());
+        } else {
+            for byte in self.data.iter() {
+                writeln!(out, ".byte {byte}");
+            }
         }
         writeln!(out).unwrap();
         out
@@ -439,7 +445,7 @@ impl Op {
     }
 
     fn regs_clobbered(&self) -> &[u8] {
-        if let OpInner::Call { id, args } = &self.inner {
+        if let OpInner::Call { id, .. } = &self.inner {
             if *id == 0 {
                 return CallType::Syscall.clobers_idx();
             }
@@ -682,7 +688,7 @@ impl Config {
     fn new() -> Self {
         Self {
             emit_comments: true,
-            emit_debug_syms: true,
+            emit_debug_syms: false,
         }
     }
 }
