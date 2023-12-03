@@ -427,10 +427,22 @@ impl Op {
         &[]
     }
 
+    fn call_type(&self) -> Option<CallType> {
+        if let OpInner::Call { id, args } = &self.inner {
+            if *id == 0 {
+                return Some(CallType::Syscall);
+            }
+        }
+        if self.is_branch() {
+            return Some(CallType::Block);
+        }
+        None
+    }
+
     /// Returns `true` if the op is a branch instruction.
     #[must_use]
     fn is_branch(&self) -> bool {
-        matches!(self.inner, OpInner::Bne { .. })
+        matches!(self.inner, OpInner::Bne { .. } | OpInner::Jmp { .. })
     }
 }
 
@@ -649,8 +661,8 @@ struct Config {
 impl Config {
     fn new() -> Self {
         Self {
-            emit_comments: false,
-            emit_debug_syms: true,
+            emit_comments: true,
+            emit_debug_syms: false,
         }
     }
 }

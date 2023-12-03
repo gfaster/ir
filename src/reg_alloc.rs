@@ -55,6 +55,13 @@ pub struct RegAlloc {
     max_stack: usize,
     free_stack: Vec<usize>,
     opqueue: Vec<AsmOp>,
+
+    /// when moving variables to registers, prefer moving entires in here to the associated
+    /// registers
+    preferred_locations: BTreeMap<Loc, u8>,
+
+    /// whether each register has something that wants to be there
+    soft_reserved: Vec<bool>,
 }
 
 impl RegAlloc {
@@ -62,19 +69,30 @@ impl RegAlloc {
         Self {
             vars: BTreeMap::new(),
             regs: vec![None; reg_cnt],
+            soft_reserved: vec![false; reg_cnt],
             times: vec![0; reg_cnt],
             age: 0,
             max_stack: 0,
             free_stack: Vec::new(),
             opqueue: Vec::new(),
+            preferred_locations: BTreeMap::new(),
         }
     }
 
-    fn free_reg(&self) -> Option<usize> {
-        if self.regs.iter().position(|x| x == &None).is_none() {
-            eprintln!("{:?} has no free slots", self.regs);
+    /// finds a free register. If a preferred location for var exists, then put it there. Also
+    /// tries to respect other soft reserved registers
+    fn free_reg(&self, var: Loc) -> Option<usize> {
+        // if self.regs.iter().position(|x| x == &None).is_none() {
+        //     eprintln!("{:?} has no free slots", self.regs);
+        // }
+        if let Some(&prefer) = self.preferred_locations.get(&var) {
+            if self.regs[prefer as usize] == None {
+                return Some(prefer as usize)
+            }
         }
-        self.regs.iter().position(|x| x == &None)
+        self.regs.iter().zip(&self.soft_reserved)
+            .position(|(&content, &resv)| content.is_none() && !resv)
+            .or_else(|| self.regs.iter().position(|&x| x == None))
     }
 
     fn is_var_init(&self, var: Loc) -> bool {
@@ -124,7 +142,7 @@ impl RegAlloc {
 
         let source = entry[0];
 
-        if let Some(free_reg) = self.free_reg() {
+        if let Some(free_reg) = self.free_reg(var) {
             self.touch_reg(free_reg as u8);
             self.regs[free_reg] = Some(var);
             let new_loc = VarLoc::Reg {
@@ -183,30 +201,40 @@ impl RegAlloc {
         self.regs[reg as usize] = None;
     }
 
-    fn oldest(&self) -> u8 {
-        self.oldest_protected(&[])
+    fn oldest(&self, var: Loc) -> u8 {
+        self.oldest_protected(&[], var)
     }
 
-    fn oldest_protected(&self, protected: &[u8]) -> u8 {
-        let ret = self.times
+    fn oldest_protected(&self, protected: &[u8], var: Loc) -> u8 {
+        const TIME_LEWAY: usize = 5;
+        let (min_time, &min_reg) = self.times
             .iter()
             .enumerate()
             .filter(|&(i, _)| !protected.contains(&(i as u8)))
             .min_by_key(|&(_i, &a)| a)
-            .expect("nonempty array and protected leaves room")
-            .0 as u8;
+            .expect("nonempty array and protected leaves room");
+        if let Some(&prefer) = self.preferred_locations.get(&var) {
+            if self.times[prefer as usize] <= min_time + TIME_LEWAY {
+                return prefer;
+            }
+        }
+        if !self.soft_reserved[min_reg] {
+            return min_reg as u8
+        }
+        self.times.iter().zip(&self.soft_reserved)
+            .position(|(&born, &resv)| born <= min_time + TIME_LEWAY && !resv)
+            .map_or(min_reg as u8, |p| p as u8)
         // eprintln!("out of {times:?}, {ret} ({reg:?}) is the oldest", times = self.times, reg = Reg::from_idx(ret));
-        ret
     }
 
-    fn evict_oldest(&mut self) -> u8 {
-        let oldest = self.oldest();
+    fn evict_oldest(&mut self, var: Loc) -> u8 {
+        let oldest = self.oldest_protected(&[], var);
         self.evict_reg(oldest);
         oldest
     }
 
-    fn evict_oldest_protected(&mut self, protected: &[u8]) -> u8 {
-        let oldest = self.oldest_protected(protected);
+    fn evict_oldest_protected(&mut self, protected: &[u8], var: Loc) -> u8 {
+        let oldest = self.oldest_protected(protected, var);
         self.evict_reg(oldest as u8);
         oldest
     }
@@ -258,14 +286,14 @@ impl RegAlloc {
             return reg;
         }
         if !self.is_var_init(var) {
-            let target = self.evict_oldest_protected(protected);
+            let target = self.evict_oldest_protected(protected, var);
             self.touch_reg(target);
             self.vars.entry(var).or_default().push(VarLoc::Reg { reg: target });
             self.regs[target as usize] = Some(var);
             return target
         }
         let source = self.fastest_source(var).into();
-        let target = self.evict_oldest_protected(protected);
+        let target = self.evict_oldest_protected(protected, var);
         self.touch_reg(target);
         self.opqueue
             .push(AsmOp::Mov(OpTarget::Reg(target), source));
@@ -315,6 +343,21 @@ impl RegAlloc {
         self.take_queue()
     }
 
+    /// hints that vars should move to the registers for the call if given the opportunity
+    pub(crate) fn hint_call(&mut self, vars: &[Loc], call_type: CallType) {
+        if let Some(args_regs) = call_type.arg_regs_idx() {
+            // eprintln!("\thas a specific calling convention");
+            let arg_regs = &args_regs[..vars.len()];
+            for (&var, &target) in vars.iter().zip(args_regs) {
+                // eprintln!("\tloading {reg:?} <- {var:?}", reg = Reg::from_idx(target));
+                self.preferred_locations.insert(var, target);
+                self.soft_reserved[target as usize] = true;
+            }
+        } else {
+            todo!()
+        }
+    }
+
     pub(crate) fn take_queue(&mut self) -> Vec<AsmOp> {
         // eprintln!("exporting assembly: {:?}", self.opqueue);
         std::mem::take(&mut self.opqueue)
@@ -335,6 +378,10 @@ impl RegAlloc {
     }
 
     pub fn free(&mut self, var: Loc) {
+        if let Some(prefer) = self.preferred_locations.remove(&var) {
+            // TODO: make the soft reserved a count
+            self.soft_reserved[prefer as usize] = false;
+        }
         let Some(vars) = self.vars.get_mut(&var) else { return; };
         for o_var in std::mem::take(vars) {
             match o_var {
@@ -364,6 +411,7 @@ impl RegAlloc {
     pub(crate) fn organize_block(block: Vec<Op>, args: &[Loc]) -> Vec<AsmOp> {
         let mut alloc = Self::new(Reg::count());
         let mut last_occurrence = Vec::new();
+        let mut upcoming_calls = Vec::new();
         // validate block and determine lifetimes
         for (i, op) in block.iter().enumerate() {
             for var in op.vars_referenced() {
@@ -371,6 +419,11 @@ impl RegAlloc {
                     last_occurrence.resize(var + 1, usize::MAX);
                 }
                 last_occurrence[var] = i;
+            }
+            if let Some(call) = op.call_type() {
+                if i != 0 {
+                    upcoming_calls.push((call, op.vars_referenced()))
+                }
             }
             if let OpInner::Block { .. } = op.inner {
                 if i != 0 {
@@ -385,6 +438,12 @@ impl RegAlloc {
 
         for (&arg, &reg) in args.iter().zip(CallType::Block.arg_regs_idx().expect("block has calling conv")) {
             alloc.force_reg(arg, reg)
+        }
+
+        let mut hint_it = upcoming_calls.into_iter();
+
+        if let Some(hint) = hint_it.next() {
+            alloc.hint_call(&hint.1, hint.0);
         }
 
         for (i, op) in block.into_iter().enumerate() {
@@ -402,6 +461,12 @@ impl RegAlloc {
             for vref in op.vars_referenced() {
                 if last_occurrence[vref] <= i {
                     alloc.free(vref);
+                }
+            }
+            // we just made a call, start setting up next call
+            if op.call_type().is_some() {
+                if let Some(hint) = hint_it.next() {
+                    alloc.hint_call(&hint.1, hint.0);
                 }
             }
         }

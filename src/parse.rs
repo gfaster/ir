@@ -22,11 +22,19 @@ impl IdentMap {
             if *assigned {
                 panic!("cannot assign twice to identifier {}", ident.as_ref())
             }
+            *assigned = true;
         }).or_insert_with(|| {
             let prev = self.1;
             self.1 += 1;
             (prev, true)
         }).0
+    }
+    fn assert_all_initialized<T>(&self, globals: &BTreeMap<usize, T>) {
+        for (key, val) in self.0.iter() {
+            if !val.1 && !globals.contains_key(&val.0) {
+                panic!("identifier {key:?} was never initialized")
+            }
+        }
     }
 }
 
@@ -420,6 +428,7 @@ impl Parser {
         }
         self.expect(TokenKind::CloseCurly);
         let globals = globals.into_iter().map(|g| (idents.lookup(&g.name).expect("previously declared"), g)).collect();
+        idents.assert_all_initialized(&globals);
         (Routine { name: name.into(), ops }, globals)
     }
 
