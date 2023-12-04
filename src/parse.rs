@@ -102,7 +102,7 @@ impl TokenKind {
                 match_str(b"define")?
             },
             TokenKind::Assign => {
-                match_char(b'=')?
+                match_str(b":=")?
             },
             TokenKind::Literal => {
                 // eprintln!("{}", String::from_utf8_lossy(&data.iter().copied().take(5).collect::<Vec<u8>>()));
@@ -140,7 +140,7 @@ enum OpType {
     Add,
     Jmp,
     Br,
-    Load,
+    Assign,
     Label,
     Global,
     Call,
@@ -169,7 +169,7 @@ impl OpType {
                 }
             };
         }
-        op_match!(data[tok.span.clone()].as_bytes() => {Add, Br, Jmp, Load, Global, Label, Call})
+        op_match!(data[tok.span.clone()].as_bytes() => {Add, Br, Jmp, Assign, Global, Label, Call})
     }
 }
 
@@ -257,10 +257,19 @@ impl Parser {
         F: FnOnce() -> D,
         D: std::fmt::Display
     {
+        let line_off_start = self.off - self.buf[..self.off].bytes().rev().position(|b| b == b'\n').unwrap_or(self.off);
+        let line_off_end = self.buf[line_off_start..].bytes().position(|b| b == b'\n')
+            .unwrap_or(self.buf.len() - line_off_start) + line_off_start;
         let file_name = self.file.as_ref().map(|f| f.display().to_string()).unwrap_or_else(|| "anonymous file".into());
         let line = self.line;
-        panic!("Error reading file {file_name} on line {line}:\n\t\
-            {}", msg())
+        panic!("Error reading file {file_name} on line {line}:\n\
+            {line_content}\n\
+            {marker:>off$}\n\t\
+            {msg}", msg = msg(),
+            off = self.off - line_off_start,
+            line_content = &self.buf[line_off_start..line_off_end],
+            marker = '^'
+        )
     }
 
     fn maybe(&mut self, kind: TokenKind) -> Option<Token> {
@@ -269,7 +278,7 @@ impl Parser {
         let new_off = self.off + pre.len() + tok.len();
         self.line += self.buf[self.off..new_off].as_bytes().iter().filter(|&&b| b == b'\n').count();
         self.off = new_off;
-        // eprintln!("read token {kind:?}: {:?}", &self.buf[span.clone()]);
+        eprintln!("read token {kind:?}: {:?}", &self.buf[span.clone()]);
         Some( Token { kind, span } )
     }
 
@@ -421,17 +430,26 @@ impl Parser {
                 let id = idents.assign(tok_str);
                 self.expect(TokenKind::Assign);
                 let tok = self.expect(TokenKind::Ident);
-                let Some(op_type) = OpType::is_op_key(&tok, &self.buf) else {
-                    parse_panic!(self, "expected operation");
+                if let Some(op_type) = OpType::is_op_key(&tok, &self.buf) {
+                    match self.parse_op(&mut idents, op_type, Some(id)) {
+                        Statement::Op(op) => ops.push(Op {
+                            inner: op,
+                            fileno: 0,
+                            line: self.line as u32,
+                        }),
+                        Statement::Global(_) => parse_panic!(self, "should only be able to have globals without assign"),
+                    }
+                } else {
+                    // this is just a value
+                    match self.parse_op(&mut idents, OpType::Assign, Some(id)) {
+                        Statement::Op(op) => ops.push(Op {
+                            inner: op,
+                            fileno: 0,
+                            line: self.line as u32,
+                        }),
+                        Statement::Global(_) => parse_panic!(self, "should only be able to have globals without assign"),
+                    }
                 };
-                match self.parse_op(&mut idents, op_type, Some(id)) {
-                    Statement::Op(op) => ops.push(Op {
-                        inner: op,
-                        fileno: 0,
-                        line: self.line as u32,
-                    }),
-                    Statement::Global(_) => parse_panic!(self, "should only be able to have globals without assign"),
-                }
             }
             self.expect_eol();
         }
@@ -476,13 +494,74 @@ impl Parser {
         idents.assign(&self.buf[tok.span])
     }
 
+    fn parse_op2(&mut self, idents: &mut IdentMap) -> Statement {
+        macro_rules! stmt {
+            ($([$optype:ident => $($tok:tt)*]),* $(,)?) => {
+                {
+                    let prev_off = self.off;
+                    let prev_line = self.line;
+                    let mut func = || {$(
+                        if let Some(res) = stmt!(@single @ $optype => $($tok)*) {
+                            return Some(res)
+                        };
+                        self.off = prev_off;
+                        self.line = prev_line;
+                    )*
+                        None
+                    };
+                    func()
+                }
+            };
+            (@single $($prevvar:ident)* @ $optype:ident => ($var:ident = $first:tt) $($tok:tt)*) => {
+                {
+                let tok = stmt!(@ty_switch $first)?;
+                let $var = self.ident_id(idents);
+                stmt!(@single $($prevvar)* $var @ $optype => $($tok)*)
+                }
+            };
+            (@single $($prevvar:ident)* @ $optype:ident => ($variant:ident $var:ident = $first:tt) $($tok:tt)*) => {
+                {
+                let tok = stmt!(@ty_switch $first)?;
+                let $var = self.ident_id_assign(idents);
+                stmt!(@single $($prevvar)* $var @ $optype => $($tok)*)
+                }
+            };
+            (@single $($prevvar:ident)* @ $optype:ident => $first:tt $($tok:tt)*) => {
+                stmt!(@single $($prevvar)* @ $optype => $($tok)*)
+            };
+            (@single $($prevvar:ident)* @ $optype:ident => ) => {
+                return Some(OpInner::$optype { $($prevvar),* })
+            };
+            (@variant decl) => {
+                self.ident_id_decl(idents)
+            };
+            (@ty_switch $key:literal) => {
+                self.maybe_keyword($key)
+            };
+            (@ty_switch [$($key:literal),* $(,)?]) => {
+                self.maybe_keyword_set(&[$($key),*])
+            };
+            (@ty_switch $kind:ident) => {
+                self.maybe(TokenKind::$kind)
+            };
+            (@ty_switch [$($kind:ident),* $(,)?]) => {
+                self.maybe_set(&[$(TokenKind::$kind),*])
+            };
+        }
+
+        let res = stmt!{
+            [Add => (assign dst = Ident) Assign "add" (op1 = Ident) Comma (op2 = Ident)],
+        };
+        res.unwrap().into()
+    }
+
     fn parse_op(&mut self, idents: &mut IdentMap, op_type: OpType, dst: Option<usize>) -> Statement {
         match op_type {
             OpType::Add => {
+                let dst = self.expect_dst(dst);
                 let op1 = self.ident_id(idents);
                 self.expect(TokenKind::Comma);
                 let op2 = self.ident_id(idents);
-                let dst = self.expect_dst(dst);
                 OpInner::Add { dst, op1, op2 }
             },
             OpType::Jmp => {
@@ -509,9 +588,8 @@ impl Parser {
                 };
                 OpInner::Bne { check: (lhs, rhs), success, fail }
             },
-            OpType::Load => {
-                let loc = self.ident_id_assign(idents);
-                self.expect(TokenKind::Comma);
+            OpType::Assign => {
+                let loc = self.expect_dst(dst);
                 let val = self.expect_val(idents);
                 OpInner::Load { loc, val }
             },

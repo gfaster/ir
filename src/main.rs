@@ -5,12 +5,15 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::io::Write;
+use std::ops::Deref;
 use std::rc::Rc;
 
 // mod reorder;
 // use reorder::*;
 
 // mod assign_lit;
+
+mod cli;
 
 mod parse;
 use parse::*;
@@ -26,7 +29,7 @@ type Loc = usize;
 #[derive(Debug)]
 enum Val {
     GlobalLabel(Id),
-    LocalLabel(Loc),
+    Local(Loc),
     Literal(u64),
 }
 
@@ -374,7 +377,7 @@ impl Op {
                         ret.push(AsmOp::Comment(format!(" ^^^ loading to {}", vars[loc])));
                         // eprintln!("load of {val:?} to {loc} ({reg:?}) complete");
                     }
-                    Val::LocalLabel(_) => todo!(),
+                    Val::Local(_) => todo!(),
                     Val::Literal(v) => {
                         let reg = alloc.move_to_reg(*loc);
                         ret.extend_from_slice(&alloc.take_queue());
@@ -474,6 +477,8 @@ impl Op {
 
 mod reg_alloc;
 use reg_alloc::*;
+
+use crate::cli::Input;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CallType {
@@ -659,7 +664,7 @@ fn make_asm(globals: &BTreeMap<usize, GlobalData>, vars: Rc<VarMap>, functions: 
     writeln!(s);
 
     writeln!(s, ".section .text");
-    writeln!(s, ".file 0 \"input.ll\"");
+    writeln!(s, ".file 0 \"{}\"", config.input_files.first().expect("has input file"));
     writeln!(s);
     for routine in functions {
         writeln!(s, "    .globl {}", routine.name).unwrap();
@@ -682,6 +687,8 @@ macro_rules! lang {
 struct Config {
     emit_debug_syms: bool,
     emit_comments: bool,
+    input_files: Vec<Box<str>>,
+    output_file: Option<Box<str>>,
 }
 
 impl Config {
@@ -689,6 +696,8 @@ impl Config {
         Self {
             emit_comments: true,
             emit_debug_syms: false,
+            output_file: None,
+            input_files: Vec::new(),
         }
     }
 }
@@ -724,7 +733,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = Config::new();
 
-    let mut input = parse::Parser::new_file("./input.ll")?;
+    let Input { mut config } = cli::read_args()?;
+    if config.input_files.is_empty() {
+        config.input_files.push("input.ll".into());
+    }
+    let input_file = config.input_files.first().map(|s| &**s).unwrap();
+
+    let mut input = parse::Parser::new_file(input_file)?;
     let ParsedFile { routine, vars, globals } = input.parse();
     let mut functions = [routine];
 
