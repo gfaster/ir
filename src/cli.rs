@@ -1,9 +1,9 @@
-use std::{fmt::Display, io, error::Error};
+use std::{error::Error, fmt::Display, io};
 
 use crate::Config;
 
 pub(crate) struct Input {
-    pub config: Config
+    pub config: Config,
 }
 
 #[derive(Debug)]
@@ -29,13 +29,13 @@ impl Display for CliError {
     }
 }
 
-impl Error for CliError { }
+impl Error for CliError {}
 
 fn parse_flag(arg: Box<str>, config: &mut Config) -> Result<(), CliError> {
     match &*arg {
         "-g" => config.emit_debug_syms = true,
         "-v" => config.emit_comments = true,
-        _ => return Err(CliError::UnknownDirective(arg))
+        _ => return Err(CliError::UnknownDirective(arg)),
     };
     Ok(())
 }
