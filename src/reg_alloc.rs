@@ -1,3 +1,4 @@
+use crate::Ctx;
 use crate::new_block_id;
 use crate::Loc;
 use crate::Op;
@@ -70,6 +71,9 @@ pub struct RegAlloc {
     free_stack: Vec<usize>,
     opqueue: Vec<AsmOp>,
 
+    /// map of variables allocated on the stack from the var id to (off, size)
+    stack_allocs: BTreeMap<Loc, (usize, usize)>,
+
     /// whether each register has something that wants to be there
     soft_reserved: Vec<u32>,
 
@@ -86,6 +90,7 @@ impl RegAlloc {
             age: 0,
             max_stack: 0,
             free_stack: Vec::new(),
+            stack_allocs: BTreeMap::new(),
             opqueue: Vec::new(),
             var_names: None,
         }
@@ -536,11 +541,55 @@ impl RegAlloc {
         self.max_stack
     }
 
+    pub fn alloca(&mut self, var: Loc, size: usize) -> usize {
+        eprintln!("allocating {}", self.var_name(var));
+        let alloc_size = ((size + 7) / 8) * 8;
+        assert_eq!(alloc_size % 8, 0);
+        if size <= 8 {
+            if let Some(slot) = self.free_stack.pop() {
+                self.stack_allocs.insert(var, (slot, alloc_size));
+                dbg!(&self.stack_allocs);
+                return slot;
+            };
+        }
+        let ret = self.max_stack;
+        self.stack_allocs.insert(var, (ret, 8));
+        self.max_stack += alloc_size;
+        dbg!(&self.stack_allocs);
+        ret
+    }
+
+    /// get the location of var
+    pub fn get_alloc(&self, var: Loc) -> Option<usize> {
+        eprintln!("fetching {}", self.var_name(var));
+        dbg!(&self.stack_allocs);
+        self.stack_allocs.get(&var).map(|&(pos, _size)| pos)
+    }
+
+    pub fn freea(&mut self, var: usize) {
+        let Some((pos, size)) = self.stack_allocs.remove(&var) else {
+            panic!(
+                "attempt to free allocated var: {var}",
+                var = self.var_name(var)
+            )
+        };
+        if size == 0 {
+            return;
+        }
+        let mut size = (((size + 7) / 8) * 8 - 8) as isize;
+        while size >= 0 {
+            assert!(!self.free_stack.contains(&(pos + size as usize)));
+            self.free_stack.push(pos + size as usize);
+            size -= 8;
+        }
+    }
+
     pub(crate) fn apply_op(&mut self, op: &RegAllocOp) {
         todo!()
     }
 
-    pub(crate) fn organize_block(block: Vec<Op>, args: &[Loc], vars: &Rc<VarMap>) -> Vec<AsmOp> {
+    pub(crate) fn organize_block(block: Vec<Op>, args: &[Loc], ctx: &Ctx) -> Vec<AsmOp> {
+        let vars = &ctx.vars;
         let mut alloc = Self::new(Reg::count());
         alloc.with_var_names(vars.clone());
         let mut last_occurrence = Vec::new();
@@ -606,7 +655,7 @@ impl RegAlloc {
                     alloc.allow_clobber(var);
                 }
             }
-            ret.extend(op.to_asm(&mut alloc, &vars));
+            ret.extend(op.to_asm(&mut alloc, ctx));
             for &clobbered in op.regs_clobbered() {
                 alloc.clobber_reg(clobbered);
             }

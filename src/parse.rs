@@ -1,10 +1,11 @@
 use std::{
+    cell::Cell,
     collections::{BTreeMap, HashMap},
     ops::Range,
-    rc::Rc, cell::Cell,
+    rc::Rc,
 };
 
-use crate::{unique_label, GlobalData, Op, OpInner, Routine, Target, Val, Loc};
+use crate::{unique_label, GlobalData, Loc, Op, OpInner, Routine, Target, Val};
 
 use self::rules::{collect_decl_args, Rule};
 
@@ -162,6 +163,8 @@ macro_rules! parse_panic {
 mod rules {
     use std::fmt::{Debug, Display};
 
+    use crate::Type;
+
     type Ob<T> = Option<Box<T>>;
 
     const VALID_IDENT: &'static [u8] =
@@ -249,7 +252,6 @@ mod rules {
             )*
         };
     }
-
 
     fn parse_mut<'a, T: Rule<'a>>(s: &'_ mut &'a str) -> Option<<T as Rule<'a>>::Output> {
         let x = T::try_parse(*s)?;
@@ -401,7 +403,10 @@ mod rules {
             s.bytes().next().filter(|b| b"0123456789".contains(b))?;
             let len = s.bytes().take_while(|b| !b.is_ascii_whitespace()).count();
             (len > 0).then_some(())?;
-            s.bytes().take(len).all(|b| b"0123456789".contains(&b)).then_some(())?;
+            s.bytes()
+                .take(len)
+                .all(|b| b"0123456789".contains(&b))
+                .then_some(())?;
             Some((Self(Span(&s[..len])), &s[len..]))
         }
     }
@@ -444,6 +449,8 @@ mod rules {
         AndOp("and");
         OrOp("or");
         XorOp("xor");
+        Alloca("alloca");
+        Store("store");
     }
 
     impl_rules_struct! {
@@ -459,9 +466,10 @@ mod rules {
         struct AssignStatement<'a> (Register<'a>, Equals<'a>, Source<'a>);
         struct BranchTarget<'a> (Label<'a>, LabelIdent<'a>, ArgList<'a>);
         struct JmpStmt<'a> (Jmp<'a>, BranchTarget<'a>);
-        struct Branch<'a> (Br<'a>, CmpType<'a>, Register<'a>, Comma<'a>, 
+        struct Branch<'a> (Br<'a>, CmpType<'a>, Register<'a>, Comma<'a>,
             Register<'a>, Comma<'a>, BranchTarget<'a>, Comma<'a>, BranchTarget<'a>);
         struct CallStmt<'a> (Call<'a>, FnIdent<'a>, ArgList<'a>);
+        struct StoreStmt<'a> (Store<'a>, TypeQual<'a>, Register<'a>, Comma<'a>, Ptr<'a>, Register<'a>);
         // struct GlobalStmt<'a> (Global<'a>, Equals<'a>, Literal<'a>);
     }
 
@@ -469,6 +477,7 @@ mod rules {
         enum Source<'a> {
             Arithmetic(ArithOp<'a>, Register<'a>, Comma<'a>, Register<'a>),
             Reg(TypeQual<'a>, Register<'a>),
+            Alloca(Alloca<'a>, TypeQual<'a>),
             Load(Load<'a>, TypeQual<'a>, Ptr<'a>, Register<'a>),
             StrLiteral(StrLiteral<'a>),
             IntLiteral(IntLiteral<'a>),
@@ -478,7 +487,8 @@ mod rules {
             Label(LabelDef<'a>),
             Jmp(JmpStmt<'a>),
             Branch(Branch<'a>),
-            Call(CallStmt<'a>)
+            Call(CallStmt<'a>),
+            Store(StoreStmt<'a>),
         }
         enum CmpType<'a> {
             Eq(CmpEq<'a>),
@@ -499,8 +509,14 @@ mod rules {
 
     decl_unit_rule!(Register, TypeQual, Op, LabelIdent, StrLiteral, IntLiteral, FnIdent);
 
-    pub enum Type {
-        I64,
+    impl From<TypeQual<'_>> for Type {
+        fn from(value: TypeQual<'_>) -> Self {
+            let s = value.as_ref();
+            match s {
+                "i64" => Type::I64,
+                _ => panic!("invalid type {s:?}"),
+            }
+        }
     }
 
     pub fn collect_args(mut args: ArgList) -> Vec<Register> {
@@ -511,13 +527,13 @@ mod rules {
         };
         out.push(reg);
         while let Some(ArgNodeRem(_, nrem)) = rem {
-            out.push( nrem.0 );
+            out.push(nrem.0);
             rem = nrem.1;
         }
         out
     }
 
-    pub fn collect_decl_args(mut args: ArgDeclList) -> Vec<(Type, Register)> {
+    pub(crate) fn collect_decl_args(mut args: ArgDeclList) -> Vec<(Type, Register)> {
         let mut list = args.1;
         let mut out = vec![];
         let Some(ArgDeclNode(reg, mut rem)) = list else {
@@ -534,15 +550,17 @@ mod rules {
     #[cfg(test)]
     mod test {
         use super::*;
-        use std::default::{Default, self};
+        use std::default::{self, Default};
 
         macro_rules! parse_structure_assert {
-            ($input:expr, $pty:ident match $pat:pat) => {
-                {
-                    let res = $pty::try_parse($input);
-                    assert!(matches!(res, Some(($pat, ""))), "{res:?} matches {}", stringify!($pat));
-                }
-            };
+            ($input:expr, $pty:ident match $pat:pat) => {{
+                let res = $pty::try_parse($input);
+                assert!(
+                    matches!(res, Some(($pat, ""))),
+                    "{res:?} matches {}",
+                    stringify!($pat)
+                );
+            }};
         }
 
         #[test]
@@ -574,11 +592,12 @@ mod rules {
         fn parse_fndef() {
             let input = "define i64 @start () {";
             let expected = FunctionDef(
-                Default::default(), 
-                TypeQual(Span("i64")), 
-                FnIdent(Span("@start")), 
+                Default::default(),
+                TypeQual(Span("i64")),
+                FnIdent(Span("@start")),
                 ArgDeclList(Default::default(), None, Default::default()),
-                Default::default());
+                Default::default(),
+            );
             assert_eq!(FunctionDef::try_parse(input), Some((expected, "")))
         }
 
@@ -659,7 +678,7 @@ impl Parser {
             _ => {
                 let name = T::name();
                 parse_panic!(self, "could not parse, failed expectation for {name}")
-            },
+            }
         };
     }
 
@@ -677,7 +696,12 @@ impl Parser {
             .collect()
     }
 
-    fn process_statement(&self, idents: &mut IdentMap, globals: &mut BTreeMap<usize, GlobalData>, stmt: rules::Statement) -> Op {
+    fn process_statement(
+        &self,
+        idents: &mut IdentMap,
+        globals: &mut BTreeMap<usize, GlobalData>,
+        stmt: rules::Statement,
+    ) -> Op {
         let inner: OpInner = match stmt {
             rules::Statement::Assign(rules::AssignStatement(dst, _, src)) => {
                 let loc = idents.assign(dst);
@@ -692,15 +716,18 @@ impl Parser {
                     },
                     rules::Source::StrLiteral(s) => {
                         let gid = super::new_global_id();
-                        globals.insert(gid, GlobalData {
-                            name: super::global_label(gid).into(),
-                            data: self.parse_str_lit(s).into(),
-                        });
-                        OpInner::Assign { 
+                        globals.insert(
+                            gid,
+                            GlobalData {
+                                name: super::global_label(gid).into(),
+                                data: self.parse_str_lit(s).into(),
+                            },
+                        );
+                        OpInner::Assign {
                             loc,
-                            val: Val::GlobalLabel(gid)
+                            val: Val::GlobalLabel(gid),
                         }
-                    },
+                    }
                     rules::Source::IntLiteral(int) => OpInner::Assign {
                         loc,
                         val: Val::Literal(int.as_ref().parse().expect("valid int literal")),
@@ -709,7 +736,11 @@ impl Parser {
                         let op1 = idents.lookup(lhs);
                         let op2 = idents.lookup(rhs);
                         match ty {
-                            rules::ArithOp::Add(_) => OpInner::Add { dst: loc, op1, op2 },
+                            rules::ArithOp::Add(_) => OpInner::Add {
+                                dst: loc,
+                                lhs: op1,
+                                rhs: op2,
+                            },
                             rules::ArithOp::Sub(_) => todo!(),
                             rules::ArithOp::Mul(_) => todo!(),
                             rules::ArithOp::Slr(_) => todo!(),
@@ -719,28 +750,53 @@ impl Parser {
                             rules::ArithOp::Or(_) => todo!(),
                             rules::ArithOp::Xor(_) => todo!(),
                         }
+                    }
+                    rules::Source::Alloca(_, ty) => OpInner::Assign {
+                        loc,
+                        val: Val::Alloca(ty.into()),
                     },
                 }
-            },
+            }
             rules::Statement::Label(rules::LabelDef(_, idt, args)) => OpInner::Block {
                 id: idents.assign(idt),
                 args: Self::collect_decl_args_idents(idents, args),
             },
-            rules::Statement::Jmp(rules::JmpStmt(_, rules::BranchTarget(_, l, args))) => OpInner::Jmp {
-                target: Target { 
-                    id: idents.lookup_or_declare(l),
-                    args: Self::collect_args_idents(idents, args)
+            rules::Statement::Jmp(rules::JmpStmt(_, rules::BranchTarget(_, l, args))) => {
+                OpInner::Jmp {
+                    target: Target {
+                        id: idents.lookup_or_declare(l),
+                        args: Self::collect_args_idents(idents, args),
+                    },
                 }
-            },
-            rules::Statement::Branch(rules::Branch(_, ty, lhs, _, rhs, _, rules::BranchTarget(_, l_pass,
-                args_pass), _, rules::BranchTarget(_, l_fail, args_fail))) => OpInner::Bne {
-                    check: (idents.lookup(lhs), idents.lookup(rhs)),
-                    success: Target { id: idents.lookup_or_declare(l_pass), args: Self::collect_args_idents(idents, args_pass) },
-                    fail: Target { id: idents.lookup_or_declare(l_fail), args: Self::collect_args_idents(idents, args_fail) },
+            }
+            rules::Statement::Branch(rules::Branch(
+                _,
+                ty,
+                lhs,
+                _,
+                rhs,
+                _,
+                rules::BranchTarget(_, l_pass, args_pass),
+                _,
+                rules::BranchTarget(_, l_fail, args_fail),
+            )) => OpInner::Bne {
+                check: (idents.lookup(lhs), idents.lookup(rhs)),
+                success: Target {
+                    id: idents.lookup_or_declare(l_pass),
+                    args: Self::collect_args_idents(idents, args_pass),
                 },
+                fail: Target {
+                    id: idents.lookup_or_declare(l_fail),
+                    args: Self::collect_args_idents(idents, args_fail),
+                },
+            },
             rules::Statement::Call(rules::CallStmt(_, func, args)) => OpInner::Call {
                 id: 0,
                 args: Self::collect_args_idents(idents, args),
+            },
+            rules::Statement::Store(rules::StoreStmt(_, ty, src, _, _, dst)) => OpInner::Store {
+                src: idents.lookup(src),
+                dst: idents.lookup(dst),
             },
         };
         Op {
@@ -807,16 +863,19 @@ impl Parser {
     {
         let not_eol = |b: u8| b != b'\n';
         let eol = |b| !not_eol(b);
-        let off = self.off.get() + self.buf[self.off.get()..].bytes().take_while(u8::is_ascii_whitespace).count();
-        let next_tok = self.peek_next_token_any();
-        let error_len = if self.buf.len() == off {1} else {next_tok.len()};
-
-        let line_off_start = off
-            - self.buf[..off]
+        let off = self.off.get()
+            + self.buf[self.off.get()..]
                 .bytes()
-                .rev()
-                .position(eol)
-                .unwrap_or(off);
+                .take_while(u8::is_ascii_whitespace)
+                .count();
+        let next_tok = self.peek_next_token_any();
+        let error_len = if self.buf.len() == off {
+            1
+        } else {
+            next_tok.len()
+        };
+
+        let line_off_start = off - self.buf[..off].bytes().rev().position(eol).unwrap_or(off);
         let line_off_end = self.buf[line_off_start..]
             .bytes()
             .position(eol)
@@ -829,13 +888,14 @@ impl Parser {
             .map(|f| f.display().to_string())
             .unwrap_or_else(|| "anonymous file".into());
         let line = self.line;
-        let line_off: usize = self.buf[line_off_start..].bytes()
-            .take(off - line_off_start).map(|b| {
-                match b {
-                    b'\t' => 4,
-                    _ => 1
-                }
-            }).sum();
+        let line_off: usize = self.buf[line_off_start..]
+            .bytes()
+            .take(off - line_off_start)
+            .map(|b| match b {
+                b'\t' => 4,
+                _ => 1,
+            })
+            .sum();
         let blue = "\x1b[94;1m";
         let red = "\x1b[31m";
         let reset = "\x1b[0m";
@@ -865,7 +925,7 @@ impl Parser {
                 let esc = match c {
                     'n' => '\n',
                     't' => '\t',
-                    _ => parse_panic!(self, "unknown escape \\{c}")
+                    _ => parse_panic!(self, "unknown escape \\{c}"),
                 };
                 escape = false;
                 out.push(esc)
