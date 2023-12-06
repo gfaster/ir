@@ -1,8 +1,8 @@
 use std::fmt::Write;
-use std::{rc::Rc, collections::BTreeMap};
+use std::{collections::BTreeMap, rc::Rc};
 
 use crate::Ctx;
-use crate::{reg_alloc::VarLoc, Config, Reg, VarMap, GlobalData, Routine};
+use crate::{reg_alloc::VarLoc, Config, GlobalData, Reg, Routine};
 
 #[derive(Debug, Clone)]
 pub enum OpTarget {
@@ -216,11 +216,12 @@ impl AsmOp {
     }
 }
 
-pub(crate) fn make_asm(
-    ctx: &Ctx,
-    functions: &mut [Routine],
-) -> String {
-    let Ctx { config, vars, globals } = ctx;
+pub(crate) fn make_asm(ctx: &Ctx, functions: &mut [Routine]) -> String {
+    let Ctx {
+        config,
+        vars,
+        globals,
+    } = ctx;
     let mut s = String::new();
     writeln!(s, ".intel_syntax noprefix");
     writeln!(s, ".intel_mnemonic");

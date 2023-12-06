@@ -1,14 +1,16 @@
-use crate::Ctx;
 use crate::new_block_id;
+use crate::Ctx;
 use crate::Loc;
+use crate::LocId;
 use crate::Op;
 use crate::OpInner;
 use crate::Reg;
 use crate::VarArray;
-use crate::VarMap;
+use crate::VarSet;
 use crate::{AsmOp, CallType, OpTarget};
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::rc::Rc;
@@ -63,8 +65,8 @@ struct VarData {
 
 #[derive(Clone)]
 pub struct RegAlloc {
-    vars: BTreeMap<Loc, VarData>,
-    regs: Vec<Option<Loc>>,
+    vars: BTreeMap<LocId, VarData>,
+    regs: Vec<Option<LocId>>,
     times: Vec<usize>,
     age: usize,
     max_stack: usize,
@@ -72,16 +74,15 @@ pub struct RegAlloc {
     opqueue: Vec<AsmOp>,
 
     /// map of variables allocated on the stack from the var id to (off, size)
-    stack_allocs: BTreeMap<Loc, (usize, usize)>,
+    stack_allocs: BTreeMap<LocId, (usize, usize)>,
+    vars_full: VarSet,
 
     /// whether each register has something that wants to be there
     soft_reserved: Vec<u32>,
-
-    var_names: Option<Rc<VarMap>>,
 }
 
 impl RegAlloc {
-    pub fn new(reg_cnt: usize) -> Self {
+    pub fn new(reg_cnt: usize, vars: VarSet) -> Self {
         Self {
             vars: BTreeMap::new(),
             regs: vec![None; reg_cnt],
@@ -92,16 +93,12 @@ impl RegAlloc {
             free_stack: Vec::new(),
             stack_allocs: BTreeMap::new(),
             opqueue: Vec::new(),
-            var_names: None,
+            vars_full: vars,
         }
     }
 
-    pub fn with_var_names(&mut self, vars: Rc<VarMap>) {
-        self.var_names = Some(vars);
-    }
-
-    fn var_name(&self, var: Loc) -> &str {
-        if let Some(name) = self.var_names.as_ref().and_then(|m| m.get(&var)) {
+    fn var_name(&self, var: LocId) -> &str {
+        if let Some(name) = self.vars_full.get(&var).and_then(|v| v.name.as_deref()) {
             return name;
         }
         "[[unknown var]]"
@@ -109,7 +106,7 @@ impl RegAlloc {
 
     /// finds a free register. If a preferred location for var exists, then put it there. Also
     /// tries to respect other soft reserved registers
-    fn free_reg(&self, var: Loc) -> Option<usize> {
+    fn free_reg(&self, var: LocId) -> Option<usize> {
         // if self.regs.iter().position(|x| x == &None).is_none() {
         //     eprintln!("{:?} has no free slots", self.regs);
         // }
@@ -125,7 +122,7 @@ impl RegAlloc {
             .or_else(|| self.regs.iter().position(|&x| x == None))
     }
 
-    fn is_var_init(&self, var: Loc) -> bool {
+    fn is_var_init(&self, var: LocId) -> bool {
         self.vars.get(&var).is_some_and(|v| !v.locs.is_empty())
     }
 
@@ -166,7 +163,7 @@ impl RegAlloc {
         }
     }
 
-    fn backup_var(&mut self, var: Loc) {
+    fn backup_var(&mut self, var: LocId) {
         let Some(entry) = self.vars.get(&var) else {
             panic!("var {var} is not defined and so can't be backed up");
         };
@@ -213,8 +210,10 @@ impl RegAlloc {
                 entry.locs.push(VarLoc::Stack { slot });
                 self.opqueue
                     .push(AsmOp::Mov(OpTarget::Stack(slot), source.into()));
-                self.opqueue
-                    .push(AsmOp::Comment(format!(" ^^^ L_{var} to stack for backup")));
+                self.opqueue.push(AsmOp::Comment(format!(
+                    " ^^^ {var} to stack for backup",
+                    var = self.var_name(var)
+                )));
             }
         }
     }
@@ -247,11 +246,11 @@ impl RegAlloc {
         self.regs[reg as usize] = None;
     }
 
-    fn oldest(&self, var: Loc) -> u8 {
+    fn oldest(&self, var: LocId) -> u8 {
         self.oldest_protected(&[], var)
     }
 
-    fn oldest_protected(&self, protected: &[u8], var: Loc) -> u8 {
+    fn oldest_protected(&self, protected: &[u8], var: LocId) -> u8 {
         const TIME_LEWAY: usize = 5;
         let (min_time, &min_reg) = self
             .times
@@ -276,20 +275,20 @@ impl RegAlloc {
         // eprintln!("out of {times:?}, {ret} ({reg:?}) is the oldest", times = self.times, reg = Reg::from_idx(ret));
     }
 
-    fn evict_oldest(&mut self, var: Loc) -> u8 {
+    fn evict_oldest(&mut self, var: LocId) -> u8 {
         let oldest = self.oldest_protected(&[], var);
         self.evict_reg(oldest);
         oldest
     }
 
-    fn evict_oldest_protected(&mut self, protected: &[u8], var: Loc) -> u8 {
+    fn evict_oldest_protected(&mut self, protected: &[u8], var: LocId) -> u8 {
         let oldest = self.oldest_protected(protected, var);
         self.evict_reg(oldest as u8);
         oldest
     }
 
     /// find the fastest place we can copy var from
-    fn fastest_source(&self, var: Loc) -> VarLoc {
+    fn fastest_source(&self, var: LocId) -> VarLoc {
         let Some(entry) = self.vars.get(&var) else {
             panic!("cannot source uninitialized var {var}");
         };
@@ -305,7 +304,7 @@ impl RegAlloc {
             .expect("source exists")
     }
 
-    fn move_to_specific_reg(&mut self, var: Loc, target: u8) {
+    fn move_to_specific_reg(&mut self, var: LocId, target: u8) {
         // self.opqueue.push(AsmOp::Comment(format!("moving var L_{var} to {reg:?}", reg = Reg::from_idx(target))));
         // self.opqueue.push(AsmOp::Comment(format!("> current: {:?}", self.vars.get(&var))));
         self.touch_reg(target);
@@ -326,10 +325,7 @@ impl RegAlloc {
                 .push(VarLoc::Reg { reg: target });
             self.opqueue
                 .push(AsmOp::Mov(OpTarget::Reg(target), source.into()));
-            self.opqueue.push(AsmOp::Comment(format!(
-                " ^^^ {var}",
-                var = self.var_name(var)
-            )));
+            self.opqueue.push(AsmOp::Comment(format!(" ^^^ {var}",)));
         } else {
             self.vars
                 .entry(var)
@@ -339,43 +335,40 @@ impl RegAlloc {
             self.opqueue.push(AsmOp::Comment(format!(
                 "uninitialized {var} to {reg:?}",
                 reg = Reg::from_idx(target).name(),
-                var = self.var_name(var)
             )));
         }
         self.regs[target as usize] = Some(var);
     }
 
-    fn move_to_reg_protected(&mut self, var: Loc, protected: &[u8]) -> u8 {
-        if let Some(reg) = self.var_reg(var) {
+    fn move_to_reg_protected(&mut self, var: &Loc, protected: &[u8]) -> u8 {
+        let varid = var.id;
+        if let Some(reg) = self.var_reg(varid) {
             debug_assert!(!protected.contains(&reg));
             // self.opqueue
             //     .push(AsmOp::Comment(format!(" {var} already in registers", var = self.var_name(var))));
             return reg;
         }
-        if !self.is_var_init(var) {
-            let target = self.evict_oldest_protected(protected, var);
+        if !self.is_var_init(varid) {
+            let target = self.evict_oldest_protected(protected, varid);
             self.touch_reg(target);
             self.vars
-                .entry(var)
+                .entry(varid)
                 .or_default()
                 .locs
                 .push(VarLoc::Reg { reg: target });
-            self.regs[target as usize] = Some(var);
+            self.regs[target as usize] = Some(varid);
             return target;
         }
-        let source = self.fastest_source(var).into();
-        let target = self.evict_oldest_protected(protected, var);
+        let source = self.fastest_source(varid).into();
+        let target = self.evict_oldest_protected(protected, varid);
         self.touch_reg(target);
         self.opqueue.push(AsmOp::Mov(OpTarget::Reg(target), source));
-        self.opqueue.push(AsmOp::Comment(format!(
-            " ^^^ {var}",
-            var = self.var_name(var)
-        )));
-        self.regs[target as usize] = Some(var);
+        self.opqueue.push(AsmOp::Comment(format!(" ^^^ {var}",)));
+        self.regs[target as usize] = Some(varid);
         target
     }
 
-    pub fn move_to_reg(&mut self, var: Loc) -> u8 {
+    pub fn move_to_reg(&mut self, var: &Loc) -> u8 {
         self.move_to_reg_protected(var, &[])
     }
 
@@ -383,7 +376,8 @@ impl RegAlloc {
     /// considedred to be the source of truth for var, so any others are invalidated
     ///
     /// does not generate assembly
-    pub fn force_reg(&mut self, var: Loc, reg: u8) {
+    pub fn force_reg(&mut self, var: &Loc, reg: u8) {
+        let var = var.id;
         self.touch_reg(reg);
         if self.regs[reg as usize] != Some(var) {
             self.remove_reg_entry(reg);
@@ -405,7 +399,7 @@ impl RegAlloc {
         for r in 0..self.regs.len() {
             eprint!("{reg:>5} = ", reg = Reg::from_idx(r as u8).name());
             if let Some(var) = self.regs[r] {
-                eprintln!("{var}", var = self.var_name(var));
+                eprintln!("{var}");
             } else {
                 eprintln!("[[EMPTY]]");
             }
@@ -416,7 +410,7 @@ impl RegAlloc {
     pub fn print_vars(&self) {
         eprintln!("variables:");
         for (var, locs) in self.vars.iter() {
-            eprint!("{var:>15} in", var = self.var_name(*var));
+            eprint!("{var:>15} in");
             for loc in &locs.locs {
                 match loc {
                     VarLoc::Stack { slot } => eprint!(" [rsp + {slot}]"),
@@ -430,24 +424,16 @@ impl RegAlloc {
     }
 
     pub(crate) fn setup_call(&mut self, vars: &[Loc], call_type: CallType) -> Vec<AsmOp> {
-        if let Some(names) = self.var_names.as_ref() {
-            eprintln!(
-                "Setting up {call_type:?} with arguments {vars:?}",
-                vars = VarArray(vars, self.var_names.as_ref().unwrap())
-            );
-        } else {
-            eprintln!("Setting up {call_type:?} with arguments {vars:?}");
-        }
+        // eprintln!("Setting up {call_type:?} with arguments {vars:#?}");
         if let Some(args_regs) = call_type.arg_regs_idx() {
             // eprintln!("\thas a specific calling convention");
             let arg_regs = &args_regs[..vars.len()];
-            for (&var, &target) in vars.iter().zip(args_regs) {
-                eprintln!(
-                    "\tloading {reg:?} <- {var}",
-                    reg = Reg::from_idx(target),
-                    var = self.var_name(var)
-                );
-                self.move_to_specific_reg(var, target);
+            for (var, &target) in vars.iter().zip(args_regs) {
+                // eprintln!(
+                //     "\tloading {reg:?} <- {var}",
+                //     reg = Reg::from_idx(target),
+                // );
+                self.move_to_specific_reg(var.id, target);
             }
             for (&clobber) in call_type.clobers_idx() {
                 if !self.regs[clobber as usize]
@@ -460,8 +446,8 @@ impl RegAlloc {
         } else {
             eprintln!("\tHas no particular calling convention - moving everything to regs");
             let mut occupied = Vec::with_capacity(vars.len());
-            for &var in vars {
-                let reg = self.move_to_reg_protected(var, &occupied);
+            for var in vars {
+                let reg = self.move_to_reg_protected(&var, &occupied);
                 occupied.push(reg);
                 eprintln!("\tloading {reg:?} <- {var:?}");
             }
@@ -470,8 +456,8 @@ impl RegAlloc {
     }
 
     /// allow this var to be clobbered (only happens via specific clobber calls)
-    pub(crate) fn allow_clobber(&mut self, var: Loc) {
-        if let Some(entry) = self.vars.get_mut(&var) {
+    pub(crate) fn allow_clobber(&mut self, var: &Loc) {
+        if let Some(entry) = self.vars.get_mut(&var.id) {
             entry.allow_clobber = true;
         }
     }
@@ -480,8 +466,8 @@ impl RegAlloc {
     pub(crate) fn hint_call(&mut self, vars: &[Loc], call_type: CallType) {
         if let Some(args_regs) = call_type.arg_regs_idx() {
             let arg_regs = &args_regs[..vars.len()];
-            for (&var, &target) in vars.iter().zip(args_regs) {
-                let pref = &mut self.vars.entry(var).or_default().preferred_location;
+            for (var, &target) in vars.iter().zip(args_regs) {
+                let pref = &mut self.vars.entry(var.id).or_default().preferred_location;
                 if let Some(old_pref) = pref {
                     self.soft_reserved[*old_pref as usize] -= 1;
                 }
@@ -499,20 +485,20 @@ impl RegAlloc {
     }
 
     /// get the var held in reg
-    pub fn reg_var(&self, reg: u8) -> Option<Loc> {
-        self.regs[reg as usize]
+    pub fn reg_var(&self, reg: u8) -> Option<&Loc> {
+        self.regs[reg as usize].map(|id| self.vars_full.get(&id).expect("register has valid LocId"))
     }
 
     /// get the first reg that holds var
-    pub fn var_reg(&self, var: Loc) -> Option<u8> {
+    pub fn var_reg(&self, var: LocId) -> Option<u8> {
         self.regs
             .iter()
             .position(|&v| v == Some(var))
             .map(|i| i as u8)
     }
 
-    pub fn free(&mut self, var: Loc) {
-        let Some(vars) = self.vars.get_mut(&var) else {
+    pub fn free(&mut self, var: &Loc) {
+        let Some(vars) = self.vars.get_mut(&var.id) else {
             return;
         };
         if let Some(prefer) = vars.preferred_location.take() {
@@ -530,48 +516,43 @@ impl RegAlloc {
                 VarLoc::Uninit => todo!(),
             };
         }
-        self.opqueue.push(AsmOp::Comment(format!(
-            "( free {var} )",
-            var = self.var_name(var)
-        )));
-        self.vars.remove(&var);
+        self.opqueue
+            .push(AsmOp::Comment(format!("( free {var} )",)));
+        self.vars.remove(&var.id);
     }
 
     pub fn stack_needed(&self) -> usize {
         self.max_stack
     }
 
-    pub fn alloca(&mut self, var: Loc, size: usize) -> usize {
-        eprintln!("allocating {}", self.var_name(var));
+    pub fn alloca(&mut self, var: &Loc, size: usize) -> usize {
+        eprintln!("allocating {var}");
         let alloc_size = ((size + 7) / 8) * 8;
         assert_eq!(alloc_size % 8, 0);
         if size <= 8 {
             if let Some(slot) = self.free_stack.pop() {
-                self.stack_allocs.insert(var, (slot, alloc_size));
-                dbg!(&self.stack_allocs);
+                self.stack_allocs.insert(var.id, (slot, alloc_size));
+                // dbg!(&self.stack_allocs);
                 return slot;
             };
         }
         let ret = self.max_stack;
-        self.stack_allocs.insert(var, (ret, 8));
+        self.stack_allocs.insert(var.id, (ret, 8));
         self.max_stack += alloc_size;
-        dbg!(&self.stack_allocs);
+        // dbg!(&self.stack_allocs);
         ret
     }
 
     /// get the location of var
-    pub fn get_alloc(&self, var: Loc) -> Option<usize> {
-        eprintln!("fetching {}", self.var_name(var));
-        dbg!(&self.stack_allocs);
-        self.stack_allocs.get(&var).map(|&(pos, _size)| pos)
+    pub fn get_alloc(&self, var: &Loc) -> Option<usize> {
+        eprintln!("fetching {var}");
+        // dbg!(&self.stack_allocs);
+        self.stack_allocs.get(&var.id).map(|&(pos, _size)| pos)
     }
 
-    pub fn freea(&mut self, var: usize) {
-        let Some((pos, size)) = self.stack_allocs.remove(&var) else {
-            panic!(
-                "attempt to free allocated var: {var}",
-                var = self.var_name(var)
-            )
+    pub fn freea(&mut self, var: &Loc) {
+        let Some((pos, size)) = self.stack_allocs.remove(&var.id) else {
+            panic!("attempt to free allocated var: {var}",)
         };
         if size == 0 {
             return;
@@ -590,21 +571,20 @@ impl RegAlloc {
 
     pub(crate) fn organize_block(block: Vec<Op>, args: &[Loc], ctx: &Ctx) -> Vec<AsmOp> {
         let vars = &ctx.vars;
-        let mut alloc = Self::new(Reg::count());
-        alloc.with_var_names(vars.clone());
+        let mut alloc = Self::new(Reg::count(), Rc::clone(vars));
         let mut last_occurrence = Vec::new();
-        let mut upcoming_calls = Vec::new();
+        let mut upcoming_calls: Vec<(CallType, Vec<Loc>)> = Vec::new();
         // validate block and determine lifetimes
         for (i, op) in block.iter().enumerate() {
             for var in op.vars_referenced() {
-                if var >= last_occurrence.len() {
-                    last_occurrence.resize(var + 1, usize::MAX);
+                if var.id >= last_occurrence.len() {
+                    last_occurrence.resize(var.id + 1, usize::MAX);
                 }
-                last_occurrence[var] = i;
+                last_occurrence[var.id] = i;
             }
             if let Some(call) = op.call_type() {
                 if i != 0 {
-                    upcoming_calls.push((call, op.vars_referenced()))
+                    upcoming_calls.push((call, op.vars_referenced().into_iter().cloned().collect()))
                 }
             }
             if let OpInner::Block { .. } = op.inner {
@@ -618,12 +598,12 @@ impl RegAlloc {
         }
         let mut ret = VecDeque::with_capacity(block.len() * 2);
 
-        for (&arg, &reg) in args.iter().zip(
+        for (arg, &reg) in args.iter().zip(
             CallType::Block
                 .arg_regs_idx()
                 .expect("block has calling conv"),
         ) {
-            alloc.force_reg(arg, reg)
+            alloc.force_reg(&arg, reg)
         }
 
         for hint in &upcoming_calls {
@@ -640,19 +620,19 @@ impl RegAlloc {
 
         for (i, op) in block.into_iter().enumerate() {
             for &clobbered in op.regs_clobbered() {
-                if let Some(var) = alloc.reg_var(clobbered) {
-                    if last_occurrence[var] > i {
+                if let Some(var) = alloc.reg_var(clobbered).cloned() {
+                    if last_occurrence[var.id] > i {
                         alloc.backup_reg(clobbered);
                     } else {
-                        alloc.allow_clobber(var);
+                        alloc.allow_clobber(&var);
                     }
                 }
             }
-            for &var in op.vars_clobbered() {
-                if last_occurrence[var] > i {
-                    alloc.backup_var(var);
+            for var in op.vars_clobbered() {
+                if last_occurrence[var.id] > i {
+                    alloc.backup_var(var.id);
                 } else {
-                    alloc.allow_clobber(var);
+                    alloc.allow_clobber(&var);
                 }
             }
             ret.extend(op.to_asm(&mut alloc, ctx));
@@ -660,7 +640,7 @@ impl RegAlloc {
                 alloc.clobber_reg(clobbered);
             }
             for vref in op.vars_referenced() {
-                if last_occurrence[vref] <= i {
+                if last_occurrence[vref.id] <= i {
                     alloc.free(vref);
                 }
             }

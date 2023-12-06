@@ -1,41 +1,49 @@
 use std::{
     cell::Cell,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     ops::Range,
     rc::Rc,
 };
 
-use crate::{unique_label, GlobalData, Loc, Op, OpInner, Routine, Target, Val};
+use crate::{unique_label, GlobalData, Loc, LocId, Op, OpInner, Routine, Target, Val, VarSet};
 
 use self::rules::{collect_decl_args, Rule};
 
-struct IdentMap(HashMap<Box<str>, (usize, bool)>, usize);
+struct IdentMap(HashMap<Rc<str>, (Loc, bool)>, usize);
 impl IdentMap {
     fn new() -> Self {
         Self(HashMap::new(), 0)
     }
-    fn try_lookup(&self, ident: impl AsRef<str>) -> Option<usize> {
-        self.0.get(ident.as_ref()).map(|&(i, _)| i)
+    fn try_lookup(&self, ident: impl AsRef<str>) -> Option<Loc> {
+        self.0.get(ident.as_ref()).map(|(i, _)| i.clone())
     }
-    fn lookup(&self, ident: impl AsRef<str>) -> usize {
+    fn lookup(&self, ident: impl AsRef<str>) -> Loc {
         let Some(ret) = self.0.get(ident.as_ref()) else {
             panic!("identifier {} undeclared", ident.as_ref());
         };
-        ret.0
+        ret.0.clone()
     }
-    fn lookup_or_declare(&mut self, ident: impl AsRef<str>) -> usize {
+    fn lookup_or_declare(&mut self, ident: impl AsRef<str>) -> Loc {
+        let name = ident.as_ref().into();
         self.0
-            .entry(ident.as_ref().into())
+            .entry(Rc::clone(&name))
             .or_insert_with(|| {
                 let prev = self.1;
                 self.1 += 1;
-                (prev, false)
+                let loc = Loc {
+                    id: prev,
+                    ty: crate::LocType::Var,
+                    name: Some(name),
+                };
+                (loc, false)
             })
             .0
+            .clone()
     }
-    fn assign(&mut self, ident: impl AsRef<str>) -> usize {
+    fn assign(&mut self, ident: impl AsRef<str>) -> Loc {
+        let name = ident.as_ref().into();
         self.0
-            .entry(ident.as_ref().into())
+            .entry(Rc::clone(&name))
             .and_modify(|(_, assigned)| {
                 if *assigned {
                     panic!("cannot assign twice to identifier {}", ident.as_ref())
@@ -45,19 +53,25 @@ impl IdentMap {
             .or_insert_with(|| {
                 let prev = self.1;
                 self.1 += 1;
-                (prev, true)
+                let loc = Loc {
+                    id: prev,
+                    ty: crate::LocType::Var,
+                    name: Some(name),
+                };
+                (loc, true)
             })
             .0
+            .clone()
     }
     fn assert_all_initialized<T>(&self, globals: &BTreeMap<usize, T>) {
         for (key, val) in self.0.iter() {
-            if !val.1 && !globals.contains_key(&val.0) {
+            if !val.1 && !globals.contains_key(&val.0.id) {
                 panic!("identifier {key:?} was never initialized")
             }
         }
     }
-    fn invert(self) -> BTreeMap<usize, Box<str>> {
-        self.0.into_iter().map(|(k, (v, _init))| (v, k)).collect()
+    fn invert(self) -> BTreeSet<Loc> {
+        self.0.into_iter().map(|(_k, (v, _init))| v).collect()
     }
 }
 
@@ -647,7 +661,7 @@ pub(crate) struct Parser {
 
 pub(crate) struct ParsedFile {
     pub routine: Routine,
-    pub vars: Rc<BTreeMap<usize, Box<str>>>,
+    pub vars: VarSet,
     pub globals: BTreeMap<usize, GlobalData>,
 }
 
@@ -758,13 +772,13 @@ impl Parser {
                 }
             }
             rules::Statement::Label(rules::LabelDef(_, idt, args)) => OpInner::Block {
-                id: idents.assign(idt),
+                id: idents.assign(idt).id,
                 args: Self::collect_decl_args_idents(idents, args),
             },
             rules::Statement::Jmp(rules::JmpStmt(_, rules::BranchTarget(_, l, args))) => {
                 OpInner::Jmp {
                     target: Target {
-                        id: idents.lookup_or_declare(l),
+                        id: idents.lookup_or_declare(l).id,
                         args: Self::collect_args_idents(idents, args),
                     },
                 }
@@ -782,11 +796,11 @@ impl Parser {
             )) => OpInner::Bne {
                 check: (idents.lookup(lhs), idents.lookup(rhs)),
                 success: Target {
-                    id: idents.lookup_or_declare(l_pass),
+                    id: idents.lookup_or_declare(l_pass).id,
                     args: Self::collect_args_idents(idents, args_pass),
                 },
                 fail: Target {
-                    id: idents.lookup_or_declare(l_fail),
+                    id: idents.lookup_or_declare(l_fail).id,
                     args: Self::collect_args_idents(idents, args_fail),
                 },
             },

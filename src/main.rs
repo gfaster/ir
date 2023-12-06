@@ -2,7 +2,7 @@
 
 // MVP FIRST!!!
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::io::Write;
 use std::ops::Deref;
@@ -27,10 +27,74 @@ use crate::cli::Input;
 /// symbol id currently global scope and unique
 type Id = usize;
 
-type VarMap = BTreeMap<Loc, Box<str>>;
+type VarSet = Rc<BTreeSet<Loc>>;
 
-/// Id of a local
-type Loc = usize;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocType {
+    StaticStackPtr(usize),
+    StaticPtr(usize),
+    Ptr,
+    Var,
+}
+
+type LocId = usize;
+
+/// local variable
+#[derive(Clone, Eq)]
+pub struct Loc {
+    pub id: LocId,
+    pub ty: LocType,
+    pub name: Option<Rc<str>>,
+}
+
+impl std::cmp::PartialEq for Loc {
+    fn eq(&self, other: &Self) -> bool {
+        if self.id == other.id {
+            debug_assert_eq!(self.ty, other.ty);
+            debug_assert_eq!(self.name, other.name);
+        }
+        self.id == other.id
+    }
+}
+
+impl std::cmp::PartialOrd for Loc {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.id.partial_cmp(&other.id)
+    }
+}
+
+impl std::cmp::Ord for Loc {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id.cmp(&other.id)
+    }
+}
+
+impl std::fmt::Display for Loc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.name {
+            Some(name) => name.fmt(f),
+            None => "unknown variable".fmt(f),
+        }
+    }
+}
+
+impl std::borrow::Borrow<LocId> for Loc {
+    fn borrow(&self) -> &LocId {
+        &self.id
+    }
+}
+
+impl std::fmt::Debug for Loc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "var {name}: {ty:?} (id {id})",
+            name = self.name.as_deref().unwrap_or("[[anonymous]]"),
+            ty = self.ty,
+            id = self.id
+        )
+    }
+}
 
 #[derive(Debug)]
 enum Type {
@@ -47,8 +111,8 @@ impl Type {
 
 struct Ctx {
     pub config: Config,
-    pub vars: Rc<VarMap>,
-    pub globals: BTreeMap<Id, GlobalData>
+    pub vars: VarSet,
+    pub globals: BTreeMap<Id, GlobalData>,
 }
 
 #[derive(Debug)]
@@ -115,11 +179,12 @@ struct Routine {
 }
 
 impl Routine {
-    fn to_asm(
-        &mut self,
-        ctx: &Ctx,
-    ) -> String {
-        let Ctx { config, vars, globals } = ctx;
+    fn to_asm(&mut self, ctx: &Ctx) -> String {
+        let Ctx {
+            config,
+            vars,
+            globals,
+        } = ctx;
         let mut out = String::new();
         let mut other_labels = BTreeMap::new();
         let mut block_start = 0;
@@ -183,17 +248,11 @@ impl Routine {
     }
 }
 
-struct VarArray<'a, 'b>(&'a [Loc], &'b VarMap);
+struct VarArray<'a>(&'a [Loc]);
 
-impl<'a, 'b> std::fmt::Debug for VarArray<'a, 'b> {
+impl<'a> std::fmt::Debug for VarArray<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_list()
-            .entries(
-                self.0
-                    .iter()
-                    .map(|loc| self.1.get(loc).map_or("unknown var", |b| &b)),
-            )
-            .finish()
+        f.debug_list().entries(self.0.iter()).finish()
     }
 }
 
@@ -266,7 +325,7 @@ impl Op {
                     ret.push(AsmOp::Syscall);
                     ret.push(AsmOp::Comment(format!(
                         "^^^ has arguments {:?}",
-                        VarArray(&args, &vars)
+                        VarArray(&args)
                     )));
                     // eprintln!("syscall complete");
                 } else {
@@ -276,29 +335,25 @@ impl Op {
             OpInner::Assign { loc, val } => {
                 match val {
                     Val::GlobalLabel(g) => {
-                        let reg = alloc.move_to_reg(*loc);
+                        let reg = alloc.move_to_reg(&loc);
                         ret.extend_from_slice(&alloc.take_queue());
                         ret.push(AsmOp::Lea(Reg::from_idx(reg), OpTarget::Label(*g)));
-                        ret.push(AsmOp::Comment(format!(" ^^^ loading to {}", vars[loc])));
+                        ret.push(AsmOp::Comment(format!(" ^^^ loading to {loc}")));
                         // eprintln!("load of {val:?} to {loc} ({reg:?}) complete");
                     }
                     Val::Local(_) => todo!(),
                     Val::Literal(v) => {
-                        let reg = alloc.move_to_reg(*loc);
+                        let reg = alloc.move_to_reg(loc);
                         ret.extend_from_slice(&alloc.take_queue());
                         ret.push(AsmOp::Mov(OpTarget::Reg(reg), OpTarget::Literal(*v)));
-                        ret.push(AsmOp::Comment(format!(
-                            " ^^^ loading literal to {}",
-                            vars[loc]
-                        )));
+                        ret.push(AsmOp::Comment(format!(" ^^^ loading literal to {loc}",)));
                         // eprintln!("load of {val:?} to {loc} ({reg:?}) complete");
                     }
                     Val::Alloca(ty) => {
-                        alloc.alloca(*loc, ty.size());
-                        ret.push(AsmOp::Comment(format!(
-                            " allocating stack space for {}",
-                            vars[loc]
-                        )));
+                        alloc.alloca(loc, ty.size());
+                        ret.push(AsmOp::Comment(
+                            format!(" allocating stack space for {loc}",),
+                        ));
                     }
                 };
             }
@@ -311,14 +366,14 @@ impl Op {
                 success,
                 fail,
             } => {
-                let regl = alloc.move_to_reg(check.0);
-                let regr = alloc.move_to_reg(check.1);
+                let regl = alloc.move_to_reg(&check.0);
+                let regr = alloc.move_to_reg(&check.1);
                 ret.extend_from_slice(&alloc.take_queue());
                 let post_label = unique_label();
                 ret.push(AsmOp::Cmp(OpTarget::Reg(regl), OpTarget::Reg(regr)));
                 ret.push(AsmOp::Comment(format!(
                     " ^^^ cmp {} with {}",
-                    vars[&check.0], vars[&check.1]
+                    &check.0, &check.1
                 )));
                 let backup = alloc.clone();
                 ret.push(AsmOp::Jeq(OpTarget::LitLabel(post_label.clone())));
@@ -339,24 +394,21 @@ impl Op {
                 lhs: op1,
                 rhs: op2,
             } => {
-                let regl = alloc.move_to_reg(*op1);
-                let regr = alloc.move_to_reg(*op2);
+                let regl = alloc.move_to_reg(op1);
+                let regr = alloc.move_to_reg(op2);
                 ret.extend_from_slice(&alloc.take_queue());
                 ret.push(AsmOp::Add(OpTarget::Reg(regl), OpTarget::Reg(regr)));
-                ret.push(AsmOp::Comment(format!(
-                    " ^^^ {} := {} + {}",
-                    vars[dst], vars[op1], vars[op2]
-                )));
-                alloc.force_reg(*dst, regl);
+                ret.push(AsmOp::Comment(format!(" ^^^ {dst} := {op1} + {op2}",)));
+                alloc.force_reg(dst, regl);
             }
             OpInner::RegAllocOp(op) => {
                 alloc.apply_op(op);
                 ret.extend_from_slice(&alloc.take_queue());
             }
             OpInner::Load { loc, ptr } => {
-                let dst = alloc.move_to_reg(*loc);
+                let dst = alloc.move_to_reg(loc);
                 let src = alloc
-                    .get_alloc(*ptr)
+                    .get_alloc(ptr)
                     .expect("this fails often since allocators keep track of alloca, see comments");
                 // I don't necessarily want to have to keep the stack-only variables in a register,
                 // which means I need to either share the stack variables, or include in the
@@ -365,15 +417,12 @@ impl Op {
                 // (that may, for example let me pass registers out of order)
                 ret.extend_from_slice(&alloc.take_queue());
                 ret.push(AsmOp::Mov(OpTarget::Reg(dst), OpTarget::Stack(src)));
-                ret.push(AsmOp::Comment(format!(
-                    " ^^^ {} := *{}",
-                    vars[loc], vars[ptr]
-                )));
+                ret.push(AsmOp::Comment(format!(" ^^^ {loc} := *{ptr}",)));
             }
             OpInner::Store { dst, src } => {
-                let rsrc = alloc.move_to_reg(*src);
-                let Some(odst) = alloc.get_alloc(*dst) else {
-                    panic!("variable {dst} was never put on the stack", dst = vars[dst])
+                let rsrc = alloc.move_to_reg(src);
+                let Some(odst) = alloc.get_alloc(dst) else {
+                    panic!("variable {dst} was never put on the stack")
                 };
                 ret.push(AsmOp::Mov(OpTarget::Stack(odst), OpTarget::Reg(rsrc)))
             }
@@ -381,38 +430,34 @@ impl Op {
         ret
     }
 
-    fn vars_referenced(&self) -> Vec<Loc> {
+    fn vars_referenced(&self) -> Vec<&Loc> {
         match &self.inner {
-            OpInner::Call { id, args } => args.clone(),
-            OpInner::Assign { loc, val } => std::slice::from_ref(loc).into(),
-            OpInner::Block { id, args } => args.clone(),
+            OpInner::Call { id, args } => args.iter().collect(),
+            OpInner::Assign { loc, val } => std::slice::from_ref(&loc).into(),
+            OpInner::Block { id, args } => args.iter().collect(),
             OpInner::Bne {
                 check,
                 success,
                 fail,
             } => Vec::from_iter(
-                [check.0, check.1].into_iter().chain(
-                    success
-                        .args
-                        .iter()
-                        .copied()
-                        .chain(fail.args.iter().copied()),
-                ),
+                [&check.0, &check.1]
+                    .into_iter()
+                    .chain(success.args.iter().chain(fail.args.iter())),
             ),
             OpInner::Add {
                 dst,
                 lhs: op1,
                 rhs: op2,
-            } => vec![*dst, *op1, *op2],
-            OpInner::Jmp { target } => Vec::from(&target.args[..]),
+            } => vec![dst, op1, op2],
+            OpInner::Jmp { target } => target.args.iter().collect(),
             OpInner::RegAllocOp(_) => {
                 panic!("vars_referenced should not be called after reg ops added")
             }
             OpInner::Load { loc, ptr } => {
-                vec![*loc, *ptr]
+                vec![loc, ptr]
             }
             OpInner::Store { dst, src } => {
-                vec![*dst, *src]
+                vec![dst, src]
             }
         }
     }
@@ -627,7 +672,6 @@ impl std::fmt::Display for Reg {
     }
 }
 
-
 macro_rules! lang {
     () => {};
 }
@@ -694,7 +738,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         globals,
     } = input.parse();
     let mut functions = [routine];
-    let ctx = Ctx { config, vars, globals };
+    let ctx = Ctx {
+        config,
+        vars,
+        globals,
+    };
 
     let asm = asm::make_asm(&ctx, &mut functions);
 
