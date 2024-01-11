@@ -5,11 +5,11 @@ use std::{
     rc::Rc,
 };
 
-use crate::{unique_label, GlobalData, Loc, LocId, Op, OpInner, Routine, Target, Val, VarSet};
+use crate::{unique_label, GlobalData, Loc, Op, OpInner, Routine, Target, Val, VarSet, IdTy};
 
 use self::rules::{collect_decl_args, Rule};
 
-struct IdentMap(HashMap<Rc<str>, (Loc, bool)>, usize);
+struct IdentMap(HashMap<Rc<str>, (Loc, bool)>, IdTy);
 impl IdentMap {
     fn new() -> Self {
         Self(HashMap::new(), 0)
@@ -30,11 +30,7 @@ impl IdentMap {
             .or_insert_with(|| {
                 let prev = self.1;
                 self.1 += 1;
-                let loc = Loc {
-                    id: prev,
-                    ty: crate::LocType::Var,
-                    name: Some(name),
-                };
+                let loc = Loc(prev);
                 (loc, false)
             })
             .0
@@ -53,19 +49,15 @@ impl IdentMap {
             .or_insert_with(|| {
                 let prev = self.1;
                 self.1 += 1;
-                let loc = Loc {
-                    id: prev,
-                    ty: crate::LocType::Var,
-                    name: Some(name),
-                };
+                let loc = Loc(prev);
                 (loc, true)
             })
             .0
             .clone()
     }
-    fn assert_all_initialized<T>(&self, globals: &BTreeMap<usize, T>) {
+    fn assert_all_initialized<T>(&self, globals: &BTreeMap<Loc, T>) {
         for (key, val) in self.0.iter() {
-            if !val.1 && !globals.contains_key(&val.0.id) {
+            if !val.1 && !globals.contains_key(&val.0) {
                 panic!("identifier {key:?} was never initialized")
             }
         }
@@ -662,7 +654,7 @@ pub(crate) struct Parser {
 pub(crate) struct ParsedFile {
     pub routine: Routine,
     pub vars: VarSet,
-    pub globals: BTreeMap<usize, GlobalData>,
+    pub globals: BTreeMap<Loc, GlobalData>,
 }
 
 impl Parser {
@@ -713,7 +705,7 @@ impl Parser {
     fn process_statement(
         &self,
         idents: &mut IdentMap,
-        globals: &mut BTreeMap<usize, GlobalData>,
+        globals: &mut BTreeMap<Loc, GlobalData>,
         stmt: rules::Statement,
     ) -> Op {
         let inner: OpInner = match stmt {
@@ -722,7 +714,7 @@ impl Parser {
                 match src {
                     rules::Source::Reg(_, reg) => OpInner::Assign {
                         loc,
-                        val: Val::Local(idents.lookup(reg)),
+                        val: Val::Binding(idents.lookup(reg)),
                     },
                     rules::Source::Load(_, _, _, reg) => OpInner::Load {
                         loc,
@@ -772,13 +764,13 @@ impl Parser {
                 }
             }
             rules::Statement::Label(rules::LabelDef(_, idt, args)) => OpInner::Block {
-                id: idents.assign(idt).id,
+                id: idents.assign(idt),
                 args: Self::collect_decl_args_idents(idents, args),
             },
             rules::Statement::Jmp(rules::JmpStmt(_, rules::BranchTarget(_, l, args))) => {
                 OpInner::Jmp {
                     target: Target {
-                        id: idents.lookup_or_declare(l).id,
+                        id: idents.lookup_or_declare(l),
                         args: Self::collect_args_idents(idents, args),
                     },
                 }
@@ -796,11 +788,11 @@ impl Parser {
             )) => OpInner::Bne {
                 check: (idents.lookup(lhs), idents.lookup(rhs)),
                 success: Target {
-                    id: idents.lookup_or_declare(l_pass).id,
+                    id: idents.lookup_or_declare(l_pass),
                     args: Self::collect_args_idents(idents, args_pass),
                 },
                 fail: Target {
-                    id: idents.lookup_or_declare(l_fail).id,
+                    id: idents.lookup_or_declare(l_fail),
                     args: Self::collect_args_idents(idents, args_fail),
                 },
             },

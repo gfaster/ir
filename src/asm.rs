@@ -1,7 +1,7 @@
 use std::fmt::Write;
 use std::{collections::BTreeMap, rc::Rc};
 
-use crate::Ctx;
+use crate::{Ctx, Loc};
 use crate::{reg_alloc::VarLoc, Config, GlobalData, Reg, Routine};
 
 #[derive(Debug, Clone)]
@@ -9,7 +9,7 @@ pub enum OpTarget {
     Literal(u64),
     Reg(u8),
     Ptr(u8),
-    Label(usize),
+    Label(Loc),
     LitLabel(String),
     Stack(usize),
 }
@@ -62,15 +62,15 @@ impl std::fmt::Display for LabelDisplay<'_> {
 
 struct OpTargetDisplay<'a, 'b, T>(&'a OpTarget, &'b T, PtrMode)
 where
-    T: Fn(usize) -> Option<&'b str>;
+    T: Fn(Loc) -> Option<&'b str>;
 
 impl<'a, 'b, T> std::fmt::Display for OpTargetDisplay<'a, 'b, T>
 where
-    T: Fn(usize) -> Option<&'b str>,
+    T: Fn(Loc) -> Option<&'b str>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let lab = &self.1;
-        let get_label = |i: usize| {
+        let get_label = |i: Loc| {
             let Some(label) = lab(i) else {
                 panic!("label {i} is not declared")
             };
@@ -116,7 +116,7 @@ impl AsmOp {
     pub(crate) fn write_op<'a, 'b: 'a>(
         &'a self,
         w: &'_ mut impl std::fmt::Write,
-        label: &'b impl Fn(usize) -> Option<&'b str>,
+        label: &'b impl Fn(Loc) -> Option<&'b str>,
         ctx: &Ctx,
     ) -> std::fmt::Result {
         let config = &ctx.config;

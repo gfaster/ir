@@ -13,7 +13,10 @@ use std::rc::Rc;
 
 // mod assign_lit;
 
+mod transform;
+
 mod cli;
+mod arch;
 
 mod parse;
 use asm::{AsmOp, OpTarget};
@@ -37,64 +40,20 @@ pub enum LocType {
     Var,
 }
 
-type LocId = usize;
+type IdTy = usize;
 
-/// local variable
-#[derive(Clone, Eq)]
-pub struct Loc {
-    pub id: LocId,
-    pub ty: LocType,
-    pub name: Option<Rc<str>>,
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Loc(IdTy);
 
-impl std::cmp::PartialEq for Loc {
-    fn eq(&self, other: &Self) -> bool {
-        if self.id == other.id {
-            debug_assert_eq!(self.ty, other.ty);
-            debug_assert_eq!(self.name, other.name);
-        }
-        self.id == other.id
-    }
-}
-
-impl std::cmp::PartialOrd for Loc {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.id.partial_cmp(&other.id)
-    }
-}
-
-impl std::cmp::Ord for Loc {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.id.cmp(&other.id)
-    }
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct BlockId(IdTy);
 
 impl std::fmt::Display for Loc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.name {
-            Some(name) => name.fmt(f),
-            None => "unknown variable".fmt(f),
-        }
+        self.0.fmt(f)
     }
 }
 
-impl std::borrow::Borrow<LocId> for Loc {
-    fn borrow(&self) -> &LocId {
-        &self.id
-    }
-}
-
-impl std::fmt::Debug for Loc {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "var {name}: {ty:?} (id {id})",
-            name = self.name.as_deref().unwrap_or("[[anonymous]]"),
-            ty = self.ty,
-            id = self.id
-        )
-    }
-}
 
 #[derive(Debug)]
 enum Type {
@@ -112,15 +71,16 @@ impl Type {
 struct Ctx {
     pub config: Config,
     pub vars: VarSet,
-    pub globals: BTreeMap<Id, GlobalData>,
+    pub globals: BTreeMap<Loc, GlobalData>,
 }
 
 #[derive(Debug)]
 enum Val {
-    GlobalLabel(Id),
-    Local(Loc),
+    GlobalLabel(Loc),
+    Binding(Loc),
     Literal(u64),
     Alloca(Type),
+    Binary(BinaryInst),
 }
 
 struct GlobalData {
@@ -150,17 +110,17 @@ fn unique_label() -> String {
     format!(".LU_{label}")
 }
 
-fn block_label(id: usize) -> String {
+fn block_label(id: Loc) -> String {
     format!(".LB_{id}")
 }
 
-fn global_label(id: usize) -> String {
+fn global_label(id: Loc) -> String {
     format!(".L_DATA_{id}")
 }
 
-fn new_global_id() -> usize {
+fn new_global_id() -> Loc {
     static LABEL_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    LABEL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    Loc(LABEL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
 fn new_block_id() -> u32 {
@@ -192,7 +152,7 @@ impl Routine {
 
         for (i, op) in self.ops.iter().enumerate() {
             if let OpInner::Block { id, .. } = &op.inner {
-                if globals.len() > *id {
+                if globals.len() > id.0 {
                     panic!("block label id conflicts with global");
                 }
                 other_labels
@@ -206,11 +166,12 @@ impl Routine {
         blocks.push(block_start..self.ops.len());
         writeln!(out, "{name}:", name = self.name).unwrap();
 
-        let get_label = |i: usize| -> Option<&str> {
-            globals.get(&i).map_or_else(
-                || other_labels.get(&i).map(|x: &String| x.as_str()),
-                |g| Some(&globals[&i].name),
-            )
+        let get_label = |i: Loc| -> Option<&str> {
+            None
+            // globals.get(&i).map_or_else(
+            //     || other_labels.get(&i).map(|x: &String| x.as_str()),
+            //     |g| Some(&globals[&i].name),
+            // )
             // if i < globals.len() {
             //     Some(&globals[&i].name)
             // } else {
@@ -248,17 +209,9 @@ impl Routine {
     }
 }
 
-struct VarArray<'a>(&'a [Loc]);
-
-impl<'a> std::fmt::Debug for VarArray<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_list().entries(self.0.iter()).finish()
-    }
-}
-
 #[derive(Debug)]
 struct Target {
-    id: Id,
+    id: Loc,
     args: Vec<Loc>,
 }
 
@@ -285,7 +238,7 @@ enum OpInner {
         ptr: Loc,
     },
     Block {
-        id: Id,
+        id: Loc,
         args: Vec<Loc>,
     },
     Bne {
@@ -307,6 +260,22 @@ enum OpInner {
     },
 }
 
+#[derive(Debug)]
+enum InstType {
+    Add,
+    Xor,
+    And,
+    Or,
+    Mul
+}
+
+#[derive(Debug)]
+struct BinaryInst {
+    pub ty: InstType,
+    pub lhs: Loc,
+    pub rhs: Loc,
+}
+
 impl From<RegAllocOp> for OpInner {
     fn from(v: RegAllocOp) -> Self {
         Self::RegAllocOp(v)
@@ -325,9 +294,8 @@ impl Op {
                     ret.push(AsmOp::Syscall);
                     ret.push(AsmOp::Comment(format!(
                         "^^^ has arguments {:?}",
-                        VarArray(&args)
+                        &args
                     )));
-                    // eprintln!("syscall complete");
                 } else {
                     todo!()
                 }
@@ -335,26 +303,34 @@ impl Op {
             OpInner::Assign { loc, val } => {
                 match val {
                     Val::GlobalLabel(g) => {
-                        let reg = alloc.move_to_reg(&loc);
+                        let reg = alloc.move_to_reg(*loc);
                         ret.extend_from_slice(&alloc.take_queue());
                         ret.push(AsmOp::Lea(Reg::from_idx(reg), OpTarget::Label(*g)));
                         ret.push(AsmOp::Comment(format!(" ^^^ loading to {loc}")));
                         // eprintln!("load of {val:?} to {loc} ({reg:?}) complete");
                     }
-                    Val::Local(_) => todo!(),
+                    Val::Binding(_) => todo!(),
                     Val::Literal(v) => {
-                        let reg = alloc.move_to_reg(loc);
+                        let reg = alloc.move_to_reg(*loc);
                         ret.extend_from_slice(&alloc.take_queue());
                         ret.push(AsmOp::Mov(OpTarget::Reg(reg), OpTarget::Literal(*v)));
                         ret.push(AsmOp::Comment(format!(" ^^^ loading literal to {loc}",)));
-                        // eprintln!("load of {val:?} to {loc} ({reg:?}) complete");
                     }
                     Val::Alloca(ty) => {
-                        alloc.alloca(loc, ty.size());
+                        alloc.alloca(*loc, ty.size());
                         ret.push(AsmOp::Comment(
                             format!(" allocating stack space for {loc}",),
                         ));
                     }
+                    Val::Binary(BinaryInst { ty, lhs, rhs }) => {
+                        let op = match ty {
+                            InstType::Add => todo!(),
+                            InstType::Xor => todo!(),
+                            InstType::And => todo!(),
+                            InstType::Or => todo!(),
+                            InstType::Mul => todo!(),
+                        };
+                    },
                 };
             }
             OpInner::Block { id, args } => {
@@ -366,8 +342,8 @@ impl Op {
                 success,
                 fail,
             } => {
-                let regl = alloc.move_to_reg(&check.0);
-                let regr = alloc.move_to_reg(&check.1);
+                let regl = alloc.move_to_reg(check.0);
+                let regr = alloc.move_to_reg(check.1);
                 ret.extend_from_slice(&alloc.take_queue());
                 let post_label = unique_label();
                 ret.push(AsmOp::Cmp(OpTarget::Reg(regl), OpTarget::Reg(regr)));
@@ -394,21 +370,21 @@ impl Op {
                 lhs: op1,
                 rhs: op2,
             } => {
-                let regl = alloc.move_to_reg(op1);
-                let regr = alloc.move_to_reg(op2);
+                let regl = alloc.move_to_reg(*op1);
+                let regr = alloc.move_to_reg(*op2);
                 ret.extend_from_slice(&alloc.take_queue());
                 ret.push(AsmOp::Add(OpTarget::Reg(regl), OpTarget::Reg(regr)));
                 ret.push(AsmOp::Comment(format!(" ^^^ {dst} := {op1} + {op2}",)));
-                alloc.force_reg(dst, regl);
+                alloc.force_reg(*dst, regl);
             }
             OpInner::RegAllocOp(op) => {
                 alloc.apply_op(op);
                 ret.extend_from_slice(&alloc.take_queue());
             }
             OpInner::Load { loc, ptr } => {
-                let dst = alloc.move_to_reg(loc);
+                let dst = alloc.move_to_reg(*loc);
                 let src = alloc
-                    .get_alloc(ptr)
+                    .get_alloc(*ptr)
                     .expect("this fails often since allocators keep track of alloca, see comments");
                 // I don't necessarily want to have to keep the stack-only variables in a register,
                 // which means I need to either share the stack variables, or include in the
@@ -420,8 +396,8 @@ impl Op {
                 ret.push(AsmOp::Comment(format!(" ^^^ {loc} := *{ptr}",)));
             }
             OpInner::Store { dst, src } => {
-                let rsrc = alloc.move_to_reg(src);
-                let Some(odst) = alloc.get_alloc(dst) else {
+                let rsrc = alloc.move_to_reg(*src);
+                let Some(odst) = alloc.get_alloc(*dst) else {
                     panic!("variable {dst} was never put on the stack")
                 };
                 ret.push(AsmOp::Mov(OpTarget::Stack(odst), OpTarget::Reg(rsrc)))
@@ -670,10 +646,6 @@ impl std::fmt::Display for Reg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.name().fmt(f)
     }
-}
-
-macro_rules! lang {
-    () => {};
 }
 
 struct Config {
