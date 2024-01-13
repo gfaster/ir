@@ -5,40 +5,71 @@ use std::{
     rc::Rc,
 };
 
-use crate::{unique_label, GlobalData, Loc, Op, OpInner, Routine, Target, Val, VarSet, IdTy};
+use crate::{unique_label, GlobalData, Binding, Op, OpInner, Routine, Target, Val, VarSet, IdTy, BlockId, instr::Instruction, ir::instruction_map, new_block_id};
 
 use self::rules::{collect_decl_args, Rule};
 
-struct IdentMap(HashMap<Rc<str>, (Loc, bool)>, IdTy);
-impl IdentMap {
-    fn new() -> Self {
-        Self(HashMap::new(), 0)
+trait Generator {
+    type Item;
+    fn next(&mut self) -> Self::Item;
+}
+
+
+// struct BindingGen;
+// impl Generator for BindingGen {
+//     type Item = Binding;
+//     fn next(&mut self) -> Self::Item {
+//         Binding::new_virtual()
+//     }
+// }
+
+impl<I, F> Generator for F 
+    where F: FnMut() -> I {
+    type Item = I;
+    fn next(&mut self) -> Self::Item {
+        self()
     }
-    fn try_lookup(&self, ident: impl AsRef<str>) -> Option<Loc> {
-        self.0.get(ident.as_ref()).map(|(i, _)| i.clone())
+}
+
+struct IdentMap<T, G>
+    where G: Generator<Item = T>
+    { 
+    map: HashMap<Rc<str>, (T, bool)>, 
+    newgen: G
+}
+
+impl<T, G: Generator<Item = T>> IdentMap<T, G> {
+    fn new(g: G) -> Self {
+        Self { map: HashMap::new(), newgen: g }
     }
-    fn lookup(&self, ident: impl AsRef<str>) -> Loc {
-        let Some(ret) = self.0.get(ident.as_ref()) else {
+    fn try_lookup(&self, ident: impl AsRef<str>) -> Option<T>
+    where T: Clone
+    {
+        self.map.get(ident.as_ref()).map(|(i, _)| i.clone())
+    }
+    fn lookup(&self, ident: impl AsRef<str>) -> T
+    where T: Clone
+    {
+        let Some(ret) = self.map.get(ident.as_ref()) else {
             panic!("identifier {} undeclared", ident.as_ref());
         };
         ret.0.clone()
     }
-    fn lookup_or_declare(&mut self, ident: impl AsRef<str>) -> Loc {
+    fn lookup_or_declare(&mut self, ident: impl AsRef<str>) -> T
+    where T: Clone
+    {
         let name = ident.as_ref().into();
-        self.0
+        self.map
             .entry(Rc::clone(&name))
-            .or_insert_with(|| {
-                let prev = self.1;
-                self.1 += 1;
-                let loc = Loc(prev);
-                (loc, false)
-            })
+            .or_insert_with(|| (self.newgen.next(), false))
             .0
             .clone()
     }
-    fn assign(&mut self, ident: impl AsRef<str>) -> Loc {
+    fn assign(&mut self, ident: impl AsRef<str>) -> T 
+    where T: Clone
+    {
         let name = ident.as_ref().into();
-        self.0
+        self.map
             .entry(Rc::clone(&name))
             .and_modify(|(_, assigned)| {
                 if *assigned {
@@ -46,26 +77,27 @@ impl IdentMap {
                 }
                 *assigned = true;
             })
-            .or_insert_with(|| {
-                let prev = self.1;
-                self.1 += 1;
-                let loc = Loc(prev);
-                (loc, true)
-            })
+            .or_insert_with(|| (self.newgen.next(), true))
             .0
             .clone()
     }
-    fn assert_all_initialized<T>(&self, globals: &BTreeMap<Loc, T>) {
-        for (key, val) in self.0.iter() {
+    fn assert_all_initialized<A>(&self, globals: &BTreeMap<T, A>)
+    where T: Ord + Eq
+    {
+        for (key, val) in self.map.iter() {
             if !val.1 && !globals.contains_key(&val.0) {
                 panic!("identifier {key:?} was never initialized")
             }
         }
     }
-    fn invert(self) -> BTreeSet<Loc> {
-        self.0.into_iter().map(|(_k, (v, _init))| v).collect()
+    fn invert(self) -> BTreeSet<T> where
+    T: Ord + Eq
+    {
+        self.map.into_iter().map(|(_k, (v, _init))| v).collect()
     }
 }
+type BindMap = IdentMap<Binding, fn() -> Binding>;
+type BlockMap = IdentMap<BlockId, fn() -> BlockId>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TokenKind {
@@ -169,7 +201,7 @@ macro_rules! parse_panic {
 mod rules {
     use std::fmt::{Debug, Display};
 
-    use crate::Type;
+    use crate::{Type, ir::instruction_map};
 
     type Ob<T> = Option<Box<T>>;
 
@@ -422,9 +454,11 @@ mod rules {
 
         fn try_parse(input: &'a str) -> Option<(Self::Output, &'a str)> {
             let s = trim_nolf(input);
-            let off = "add".len();
-            s.starts_with("add").then_some(())?;
-            Some((Self(Span(&s[..off])), &s[off..]))
+            let map = instruction_map();
+            let len = s.bytes().take_while(u8::is_ascii_alphanumeric).count();
+            (len > 0).then_some(())?;
+            map.contains_key(&s[..len]).then_some(())?;
+            Some((Self(Span(&s[..len])), &s[len..]))
         }
     }
 
@@ -446,15 +480,6 @@ mod rules {
         CmpNe("ne");
         Br("br");
         Call("call");
-        AddOp("add");
-        SubOp("sub");
-        MulOp("mul");
-        SlrOp("slr");
-        SllOp("sll");
-        SarOp("sar");
-        AndOp("and");
-        OrOp("or");
-        XorOp("xor");
         Alloca("alloca");
         Store("store");
     }
@@ -472,8 +497,7 @@ mod rules {
         struct AssignStatement<'a> (Register<'a>, Equals<'a>, Source<'a>);
         struct BranchTarget<'a> (Label<'a>, LabelIdent<'a>, ArgList<'a>);
         struct JmpStmt<'a> (Jmp<'a>, BranchTarget<'a>);
-        struct Branch<'a> (Br<'a>, CmpType<'a>, Register<'a>, Comma<'a>,
-            Register<'a>, Comma<'a>, BranchTarget<'a>, Comma<'a>, BranchTarget<'a>);
+        struct Branch<'a> (Br<'a>, Register<'a>, Comma<'a>, BranchTarget<'a>, Comma<'a>, BranchTarget<'a>);
         struct CallStmt<'a> (Call<'a>, FnIdent<'a>, ArgList<'a>);
         struct StoreStmt<'a> (Store<'a>, TypeQual<'a>, Register<'a>, Comma<'a>, Ptr<'a>, Register<'a>);
         // struct GlobalStmt<'a> (Global<'a>, Equals<'a>, Literal<'a>);
@@ -481,7 +505,7 @@ mod rules {
 
     impl_rules_enum! {
         enum Source<'a> {
-            Arithmetic(ArithOp<'a>, Register<'a>, Comma<'a>, Register<'a>),
+            Binary(Op<'a>, Register<'a>, Comma<'a>, Register<'a>),
             Reg(TypeQual<'a>, Register<'a>),
             Alloca(Alloca<'a>, TypeQual<'a>),
             Load(Load<'a>, TypeQual<'a>, Ptr<'a>, Register<'a>),
@@ -495,21 +519,6 @@ mod rules {
             Branch(Branch<'a>),
             Call(CallStmt<'a>),
             Store(StoreStmt<'a>),
-        }
-        enum CmpType<'a> {
-            Eq(CmpEq<'a>),
-            Ne(CmpNe<'a>),
-        }
-        enum ArithOp<'a> {
-            Add(AddOp<'a>),
-            Sub(SubOp<'a>),
-            Mul(MulOp<'a>),
-            Slr(SlrOp<'a>),
-            Sll(SllOp<'a>),
-            Sar(SarOp<'a>),
-            And(AndOp<'a>),
-            Or(OrOp<'a>),
-            Xor(XorOp<'a>),
         }
     }
 
@@ -654,7 +663,7 @@ pub(crate) struct Parser {
 pub(crate) struct ParsedFile {
     pub routine: Routine,
     pub vars: VarSet,
-    pub globals: BTreeMap<Loc, GlobalData>,
+    pub globals: BTreeMap<Binding, GlobalData>,
 }
 
 impl Parser {
@@ -688,14 +697,14 @@ impl Parser {
         };
     }
 
-    fn collect_decl_args_idents(idents: &mut IdentMap, args: rules::ArgDeclList) -> Vec<Loc> {
+    fn collect_decl_args_idents(idents: &mut BindMap, args: rules::ArgDeclList) -> Vec<Binding> {
         rules::collect_decl_args(args)
             .into_iter()
             .map(|(_, idt)| idents.assign(idt))
             .collect()
     }
 
-    fn collect_args_idents(idents: &IdentMap, args: rules::ArgList) -> Vec<Loc> {
+    fn collect_args_idents(idents: &BindMap, args: rules::ArgList) -> Vec<Binding> {
         rules::collect_args(args)
             .into_iter()
             .map(|idt| idents.lookup(idt))
@@ -704,8 +713,9 @@ impl Parser {
 
     fn process_statement(
         &self,
-        idents: &mut IdentMap,
-        globals: &mut BTreeMap<Loc, GlobalData>,
+        blocks: &mut BlockMap,
+        idents: &mut BindMap,
+        globals: &mut BTreeMap<Binding, GlobalData>,
         stmt: rules::Statement,
     ) -> Op {
         let inner: OpInner = match stmt {
@@ -721,7 +731,7 @@ impl Parser {
                         ptr: idents.lookup_or_declare(reg),
                     },
                     rules::Source::StrLiteral(s) => {
-                        let gid = super::new_global_id();
+                        let gid = Binding::new_virtual();
                         globals.insert(
                             gid,
                             GlobalData {
@@ -738,24 +748,13 @@ impl Parser {
                         loc,
                         val: Val::Literal(int.as_ref().parse().expect("valid int literal")),
                     },
-                    rules::Source::Arithmetic(ty, lhs, _, rhs) => {
+                    rules::Source::Binary(ty, lhs, _, rhs) => {
                         let op1 = idents.lookup(lhs);
                         let op2 = idents.lookup(rhs);
-                        match ty {
-                            rules::ArithOp::Add(_) => OpInner::Add {
-                                dst: loc,
-                                lhs: op1,
-                                rhs: op2,
-                            },
-                            rules::ArithOp::Sub(_) => todo!(),
-                            rules::ArithOp::Mul(_) => todo!(),
-                            rules::ArithOp::Slr(_) => todo!(),
-                            rules::ArithOp::Sll(_) => todo!(),
-                            rules::ArithOp::Sar(_) => todo!(),
-                            rules::ArithOp::And(_) => todo!(),
-                            rules::ArithOp::Or(_) => todo!(),
-                            rules::ArithOp::Xor(_) => todo!(),
-                        }
+                        let op = instruction_map()[ty.as_ref()];
+                        let mut ins = Instruction::new(op);
+                        ins.push_ops([loc, op1, op2]);
+                        OpInner::Op { ins }
                     }
                     rules::Source::Alloca(_, ty) => OpInner::Assign {
                         loc,
@@ -764,7 +763,7 @@ impl Parser {
                 }
             }
             rules::Statement::Label(rules::LabelDef(_, idt, args)) => OpInner::Block {
-                id: idents.assign(idt),
+                id: blocks.assign(idt),
                 args: Self::collect_decl_args_idents(idents, args),
             },
             rules::Statement::Jmp(rules::JmpStmt(_, rules::BranchTarget(_, l, args))) => {
@@ -777,16 +776,13 @@ impl Parser {
             }
             rules::Statement::Branch(rules::Branch(
                 _,
-                ty,
-                lhs,
-                _,
-                rhs,
+                ck,
                 _,
                 rules::BranchTarget(_, l_pass, args_pass),
                 _,
                 rules::BranchTarget(_, l_fail, args_fail),
-            )) => OpInner::Bne {
-                check: (idents.lookup(lhs), idents.lookup(rhs)),
+            )) => OpInner::Br {
+                check: idents.lookup(ck),
                 success: Target {
                     id: idents.lookup_or_declare(l_pass),
                     args: Self::collect_args_idents(idents, args_pass),
@@ -815,7 +811,8 @@ impl Parser {
     pub fn parse(mut self) -> ParsedFile {
         let rules::FunctionDef(_, _, fn_name, args, _) = self.expect::<rules::FunctionDef>();
         let args = rules::collect_decl_args(args);
-        let mut idents = IdentMap::new();
+        let mut idents = BindMap::new(Binding::new_virtual);
+        let mut blocks = BlockMap::new(new_block_id);
         for (_, arg) in args {
             idents.assign(arg);
         }
@@ -824,7 +821,7 @@ impl Parser {
         while let Some(stmt) = self.maybe::<rules::Statement>() {
             // dbg!(&stmt);
             // dbg!(&self.buf[self.off.get()..]);
-            ops.push(self.process_statement(&mut idents, &mut globals, stmt));
+            ops.push(self.process_statement(&mut blocks, &mut idents, &mut globals, stmt));
         }
         self.expect::<rules::CloseCurly>();
         let routine = Routine {

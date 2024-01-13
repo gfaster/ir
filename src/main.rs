@@ -13,10 +13,13 @@ use std::rc::Rc;
 
 // mod assign_lit;
 
-mod transform;
-
 mod cli;
 mod arch;
+mod instr;
+mod reg;
+use instr::Instruction;
+use reg::{Binding, BlockId};
+mod ir;
 
 mod parse;
 use asm::{AsmOp, OpTarget};
@@ -30,7 +33,7 @@ use crate::cli::Input;
 /// symbol id currently global scope and unique
 type Id = usize;
 
-type VarSet = Rc<BTreeSet<Loc>>;
+type VarSet = Rc<BTreeSet<Binding>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocType {
@@ -41,18 +44,6 @@ pub enum LocType {
 }
 
 type IdTy = usize;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Loc(IdTy);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct BlockId(IdTy);
-
-impl std::fmt::Display for Loc {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
 
 
 #[derive(Debug)]
@@ -71,16 +62,15 @@ impl Type {
 struct Ctx {
     pub config: Config,
     pub vars: VarSet,
-    pub globals: BTreeMap<Loc, GlobalData>,
+    pub globals: BTreeMap<Binding, GlobalData>,
 }
 
 #[derive(Debug)]
 enum Val {
-    GlobalLabel(Loc),
-    Binding(Loc),
+    GlobalLabel(Binding),
+    Binding(Binding),
     Literal(u64),
     Alloca(Type),
-    Binary(BinaryInst),
 }
 
 struct GlobalData {
@@ -110,22 +100,12 @@ fn unique_label() -> String {
     format!(".LU_{label}")
 }
 
-fn block_label(id: Loc) -> String {
+fn block_label(id: BlockId) -> String {
     format!(".LB_{id}")
 }
 
-fn global_label(id: Loc) -> String {
+fn global_label(id: Binding) -> String {
     format!(".L_DATA_{id}")
-}
-
-fn new_global_id() -> Loc {
-    static LABEL_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    Loc(LABEL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
-}
-
-fn new_block_id() -> u32 {
-    static LABEL_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    LABEL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 fn new_function_id() -> u32 {
@@ -152,9 +132,9 @@ impl Routine {
 
         for (i, op) in self.ops.iter().enumerate() {
             if let OpInner::Block { id, .. } = &op.inner {
-                if globals.len() > id.0 {
-                    panic!("block label id conflicts with global");
-                }
+                // if globals.len() > id.0 {
+                //     panic!("block label id conflicts with global");
+                // }
                 other_labels
                     .entry(*id)
                     .and_modify(|_| panic!("block label redeclared"))
@@ -166,7 +146,7 @@ impl Routine {
         blocks.push(block_start..self.ops.len());
         writeln!(out, "{name}:", name = self.name).unwrap();
 
-        let get_label = |i: Loc| -> Option<&str> {
+        let get_label = |i: Binding| -> Option<&str> {
             None
             // globals.get(&i).map_or_else(
             //     || other_labels.get(&i).map(|x: &String| x.as_str()),
@@ -211,8 +191,8 @@ impl Routine {
 
 #[derive(Debug)]
 struct Target {
-    id: Loc,
-    args: Vec<Loc>,
+    id: Binding,
+    args: Vec<Binding>,
 }
 
 #[derive(Debug)]
@@ -226,54 +206,36 @@ struct Op {
 enum OpInner {
     Call {
         id: Id,
-        args: Vec<Loc>,
+        args: Vec<Binding>,
     },
     RegAllocOp(RegAllocOp),
     Assign {
-        loc: Loc,
+        loc: Binding,
         val: Val,
     },
     Load {
-        loc: Loc,
-        ptr: Loc,
+        loc: Binding,
+        ptr: Binding,
     },
     Block {
-        id: Loc,
-        args: Vec<Loc>,
+        id: BlockId,
+        args: Vec<Binding>,
     },
-    Bne {
-        check: (Loc, Loc),
+    Br {
+        check: Binding,
         success: Target,
         fail: Target,
+    },
+    Op {
+        ins: Instruction,
     },
     Jmp {
         target: Target,
     },
-    Add {
-        dst: Loc,
-        lhs: Loc,
-        rhs: Loc,
-    },
     Store {
-        dst: Loc,
-        src: Loc,
+        dst: Binding,
+        src: Binding,
     },
-}
-
-#[derive(Debug)]
-enum InstType {
-    Add,
-    Xor,
-    And,
-    Or,
-    Mul
-}
-
-#[derive(Debug)]
-struct BinaryInst {
-    pub ty: InstType,
-    pub lhs: Loc,
-    pub rhs: Loc,
 }
 
 impl From<RegAllocOp> for OpInner {
@@ -322,22 +284,13 @@ impl Op {
                             format!(" allocating stack space for {loc}",),
                         ));
                     }
-                    Val::Binary(BinaryInst { ty, lhs, rhs }) => {
-                        let op = match ty {
-                            InstType::Add => todo!(),
-                            InstType::Xor => todo!(),
-                            InstType::And => todo!(),
-                            InstType::Or => todo!(),
-                            InstType::Mul => todo!(),
-                        };
-                    },
                 };
             }
             OpInner::Block { id, args } => {
                 ret.extend_from_slice(&alloc.setup_call(&args, CallType::Block));
                 ret.push(AsmOp::Label(block_label(*id)));
             }
-            OpInner::Bne {
+            OpInner::Br {
                 check,
                 success,
                 fail,
@@ -406,43 +359,41 @@ impl Op {
         ret
     }
 
-    fn vars_referenced(&self) -> Vec<&Loc> {
+    fn vars_referenced(&self) -> Vec<Binding> {
         match &self.inner {
-            OpInner::Call { id, args } => args.iter().collect(),
-            OpInner::Assign { loc, val } => std::slice::from_ref(&loc).into(),
-            OpInner::Block { id, args } => args.iter().collect(),
-            OpInner::Bne {
+            OpInner::Call { id, args } => args.iter().copied().collect(),
+            OpInner::Assign { loc, val } => vec![*loc],
+            OpInner::Block { id, args } => args.iter().copied().collect(),
+            OpInner::Br {
                 check,
                 success,
                 fail,
             } => Vec::from_iter(
-                [&check.0, &check.1]
+                [*check]
                     .into_iter()
-                    .chain(success.args.iter().chain(fail.args.iter())),
+                    .chain(success.args.iter().copied().chain(fail.args.iter().copied())),
             ),
-            OpInner::Add {
-                dst,
-                lhs: op1,
-                rhs: op2,
-            } => vec![dst, op1, op2],
-            OpInner::Jmp { target } => target.args.iter().collect(),
+            OpInner::Jmp { target } => target.args.iter().copied().collect(),
             OpInner::RegAllocOp(_) => {
                 panic!("vars_referenced should not be called after reg ops added")
             }
             OpInner::Load { loc, ptr } => {
-                vec![loc, ptr]
+                vec![*loc, *ptr]
             }
             OpInner::Store { dst, src } => {
-                vec![dst, src]
+                vec![*dst, *src]
             }
+            OpInner::Op { ins } => {
+                ins.set_registers().chain(ins.read_registers()).collect()
+            },
         }
     }
 
-    fn vars_clobbered(&self) -> &[Loc] {
-        if let OpInner::Add { lhs: op1, .. } = &self.inner {
-            return std::slice::from_ref(op1);
+    fn vars_clobbered(&self) -> Vec<Binding> {
+        if let OpInner::Op { ins } = self.inner {
+            return ins.set_registers().collect()
         }
-        &[]
+        Vec::new()
     }
 
     fn regs_clobbered(&self) -> &[u8] {
@@ -469,7 +420,12 @@ impl Op {
     /// Returns `true` if the op is a branch instruction.
     #[must_use]
     fn is_branch(&self) -> bool {
-        matches!(self.inner, OpInner::Bne { .. } | OpInner::Jmp { .. })
+        match self.inner {
+            OpInner::Br { .. } => true,
+            OpInner::Jmp { .. } => true,
+            OpInner::Op { ins } => ins.is_branch,
+            _ => false
+        }
     }
 }
 
