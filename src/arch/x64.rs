@@ -1,5 +1,5 @@
 #![allow(non_camel_case_types)]
-use crate::instr::InstrProp;
+use crate::instr::{MachineInstrProp, BasicInstrProp, ArgCnt};
 
 pub mod r {
     use crate::reg::MachineReg;
@@ -75,12 +75,29 @@ pub mod r {
     }
 }
 
-const OP_RR_R: InstrProp = InstrProp {
-    op_cnt: 2,
+const BASIC_TEMPLATE: BasicInstrProp = BasicInstrProp {
+    arg_cnt: ArgCnt::Unknown,
+    arg_classes: None,
+    res_cnt: 0,
     mnemonic: "[TEMPLATE]",
     is_branch: false,
     is_terminator: false,
+    is_block_header: false,
     is_commutative: false,
+    has_side_effects: true,
+    may_read_memory: true,
+    may_write_memory: true,
+};
+
+const OP_RR_R: MachineInstrProp = MachineInstrProp {
+    basic: BasicInstrProp {
+        arg_cnt: ArgCnt::Known(2),
+        res_cnt: 1,
+        is_branch: false,
+        is_terminator: false,
+        is_commutative: false,
+        ..BASIC_TEMPLATE
+    },
     set_regs: &[],
     read_regs: &[],
     set_operands: &[0],
@@ -88,12 +105,15 @@ const OP_RR_R: InstrProp = InstrProp {
     operand_relative_type_constraints: &[0, 0, 0],
 };
 
-const BIN_RR_F: InstrProp = InstrProp {
-    op_cnt: 3,
-    mnemonic: "[TEMPLATE]",
-    is_branch: false,
-    is_terminator: false,
-    is_commutative: false,
+const BIN_RR_F: MachineInstrProp = MachineInstrProp {
+    basic: BasicInstrProp {
+        arg_cnt: ArgCnt::Known(2),
+        res_cnt: 1,
+        is_branch: false,
+        is_terminator: false,
+        is_commutative: false,
+        ..BASIC_TEMPLATE
+    },
     set_regs: &[r::Reg::Eflags.to_mach()],
     read_regs: &[],
     set_operands: &[0],
@@ -101,12 +121,15 @@ const BIN_RR_F: InstrProp = InstrProp {
     operand_relative_type_constraints: &[0, 1, 1],
 };
 
-const BIN_RR_FR: InstrProp = InstrProp {
-    op_cnt: 4,
-    mnemonic: "[TEMPLATE]",
-    is_branch: false,
-    is_terminator: false,
-    is_commutative: false,
+const BIN_RR_FR: MachineInstrProp = MachineInstrProp {
+    basic: BasicInstrProp {
+        arg_cnt: ArgCnt::Known(2),
+        res_cnt: 2,
+        is_branch: false,
+        is_terminator: false,
+        is_commutative: false,
+        ..BASIC_TEMPLATE
+    },
     set_regs: &[r::Reg::Eflags.to_mach()],
     read_regs: &[],
     set_operands: &[0, 1],

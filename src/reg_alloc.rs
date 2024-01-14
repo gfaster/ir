@@ -1,10 +1,10 @@
-use crate::new_block_id;
 use crate::Ctx;
 use crate::Binding;
 use crate::Op;
 use crate::OpInner;
 use crate::Reg;
 use crate::VarSet;
+use crate::reg::BlockId;
 use crate::{AsmOp, CallType, OpTarget};
 
 use std::collections::BTreeMap;
@@ -572,12 +572,13 @@ impl RegAlloc {
         let mut upcoming_calls: Vec<(CallType, Vec<Binding>)> = Vec::new();
         // validate block and determine lifetimes
         for (i, op) in block.iter().enumerate() {
-            for &var in op.vars_referenced() {
-                last_occurrence.insert(var, i);
+            let vref = op.vars_referenced();
+            for var in &vref {
+                last_occurrence.insert(*var, i);
             }
             if let Some(call) = op.call_type() {
                 if i != 0 {
-                    upcoming_calls.push((call, op.vars_referenced().into_iter().cloned().collect()))
+                    upcoming_calls.push((call, vref))
                 }
             }
             if let OpInner::Block { .. } = op.inner {
@@ -632,7 +633,7 @@ impl RegAlloc {
             for &clobbered in op.regs_clobbered() {
                 alloc.clobber_reg(clobbered);
             }
-            for vref in op.vars_referenced() {
+            for vref in &op.vars_referenced() {
                 if last_occurrence[vref] <= i {
                     alloc.free(*vref);
                 }
@@ -654,7 +655,7 @@ impl RegAlloc {
             ret.push_front(AsmOp::Push(Reg::Rbp));
             ret.push_back(AsmOp::Pop(Reg::Rbp));
         }
-        let block_id = new_block_id();
+        let block_id = BlockId::new();
         ret.push_front(AsmOp::BlockBegin(block_id));
         ret.push_back(AsmOp::BlockEnd(block_id));
         ret.into()

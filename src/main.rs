@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::io::Write;
 use std::ops::Deref;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 // mod reorder;
 // use reorder::*;
@@ -17,9 +17,10 @@ mod cli;
 mod arch;
 mod instr;
 mod reg;
-use instr::Instruction;
+use instr::{MachineInstruction, BasicInstrProp, Instruction};
 use reg::{Binding, BlockId};
 mod ir;
+mod vec_map;
 
 mod parse;
 use asm::{AsmOp, OpTarget};
@@ -46,7 +47,7 @@ pub enum LocType {
 type IdTy = usize;
 
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum Type {
     I64,
 }
@@ -65,7 +66,7 @@ struct Ctx {
     pub globals: BTreeMap<Binding, GlobalData>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Val {
     GlobalLabel(Binding),
     Binding(Binding),
@@ -113,137 +114,80 @@ fn new_function_id() -> u32 {
     LABEL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-struct Routine {
-    name: Box<str>,
-    ops: Vec<Op>,
-}
+// impl Routine {
+//     fn to_asm(&mut self, ctx: &Ctx) -> String {
+//         let Ctx {
+//             config,
+//             vars,
+//             globals,
+//         } = ctx;
+//         let mut out = String::new();
+//         let mut other_labels = BTreeMap::new();
+//         let mut block_start = 0;
+//         let mut blocks = Vec::new();
+//
+//         for (i, op) in self.ops.iter().enumerate() {
+//             if let OpInner::Block { id, .. } = &op.inner {
+//                 // if globals.len() > id.0 {
+//                 //     panic!("block label id conflicts with global");
+//                 // }
+//                 other_labels
+//                     .entry(*id)
+//                     .and_modify(|_| panic!("block label redeclared"))
+//                     .or_insert_with(|| block_label(*id));
+//                 blocks.push(block_start..i);
+//                 block_start = i;
+//             }
+//         }
+//         blocks.push(block_start..self.ops.len());
+//         writeln!(out, "{name}:", name = self.name).unwrap();
+//
+//         let get_label = |i: Binding| -> Option<&str> {
+//             None
+//             // globals.get(&i).map_or_else(
+//             //     || other_labels.get(&i).map(|x: &String| x.as_str()),
+//             //     |g| Some(&globals[&i].name),
+//             // )
+//             // if i < globals.len() {
+//             //     Some(&globals[&i].name)
+//             // } else {
+//             //     other_labels.get(&i).map(|x: &String| x.as_str())
+//             // }
+//         };
+//
+//         let func_id = new_function_id();
+//         AsmOp::FuncBegin(func_id).write_op(&mut out, &get_label, ctx);
+//         for (i, block) in blocks.into_iter().enumerate() {
+//             let args = if i == 0 {
+//                 vec![]
+//             } else {
+//                 let OpInner::Block { args, .. } = &self.ops[0].inner else {
+//                     panic!(
+//                         "all blocks except the first must start with block op, \
+//                         but this starts with {:?}",
+//                         &self.ops[0]
+//                     );
+//                 };
+//                 args.clone()
+//             };
+//             let rem = self.ops.split_off(block.len());
+//             let block = std::mem::replace(&mut self.ops, rem);
+//             // eprintln!("{:?}\n", &block);
+//             let vasm = RegAlloc::organize_block(block, &args, ctx);
+//             for asm in vasm {
+//                 asm.write_op(&mut out, &get_label, ctx);
+//             }
+//         }
+//         AsmOp::FuncEnd(func_id).write_op(&mut out, &get_label, ctx);
+//
+//         writeln!(out).unwrap();
+//         out
+//     }
+// }
 
-impl Routine {
-    fn to_asm(&mut self, ctx: &Ctx) -> String {
-        let Ctx {
-            config,
-            vars,
-            globals,
-        } = ctx;
-        let mut out = String::new();
-        let mut other_labels = BTreeMap::new();
-        let mut block_start = 0;
-        let mut blocks = Vec::new();
 
-        for (i, op) in self.ops.iter().enumerate() {
-            if let OpInner::Block { id, .. } = &op.inner {
-                // if globals.len() > id.0 {
-                //     panic!("block label id conflicts with global");
-                // }
-                other_labels
-                    .entry(*id)
-                    .and_modify(|_| panic!("block label redeclared"))
-                    .or_insert_with(|| block_label(*id));
-                blocks.push(block_start..i);
-                block_start = i;
-            }
-        }
-        blocks.push(block_start..self.ops.len());
-        writeln!(out, "{name}:", name = self.name).unwrap();
 
-        let get_label = |i: Binding| -> Option<&str> {
-            None
-            // globals.get(&i).map_or_else(
-            //     || other_labels.get(&i).map(|x: &String| x.as_str()),
-            //     |g| Some(&globals[&i].name),
-            // )
-            // if i < globals.len() {
-            //     Some(&globals[&i].name)
-            // } else {
-            //     other_labels.get(&i).map(|x: &String| x.as_str())
-            // }
-        };
-
-        let func_id = new_function_id();
-        AsmOp::FuncBegin(func_id).write_op(&mut out, &get_label, ctx);
-        for (i, block) in blocks.into_iter().enumerate() {
-            let args = if i == 0 {
-                vec![]
-            } else {
-                let OpInner::Block { args, .. } = &self.ops[0].inner else {
-                    panic!(
-                        "all blocks except the first must start with block op, \
-                        but this starts with {:?}",
-                        &self.ops[0]
-                    );
-                };
-                args.clone()
-            };
-            let rem = self.ops.split_off(block.len());
-            let block = std::mem::replace(&mut self.ops, rem);
-            // eprintln!("{:?}\n", &block);
-            let vasm = RegAlloc::organize_block(block, &args, ctx);
-            for asm in vasm {
-                asm.write_op(&mut out, &get_label, ctx);
-            }
-        }
-        AsmOp::FuncEnd(func_id).write_op(&mut out, &get_label, ctx);
-
-        writeln!(out).unwrap();
-        out
-    }
-}
-
-#[derive(Debug)]
-struct Target {
-    id: Binding,
-    args: Vec<Binding>,
-}
-
-#[derive(Debug)]
-struct Op {
-    inner: OpInner,
-    fileno: u32,
-    line: u32,
-}
-
-#[derive(Debug)]
-enum OpInner {
-    Call {
-        id: Id,
-        args: Vec<Binding>,
-    },
-    RegAllocOp(RegAllocOp),
-    Assign {
-        loc: Binding,
-        val: Val,
-    },
-    Load {
-        loc: Binding,
-        ptr: Binding,
-    },
-    Block {
-        id: BlockId,
-        args: Vec<Binding>,
-    },
-    Br {
-        check: Binding,
-        success: Target,
-        fail: Target,
-    },
-    Op {
-        ins: Instruction,
-    },
-    Jmp {
-        target: Target,
-    },
-    Store {
-        dst: Binding,
-        src: Binding,
-    },
-}
-
-impl From<RegAllocOp> for OpInner {
-    fn from(v: RegAllocOp) -> Self {
-        Self::RegAllocOp(v)
-    }
-}
-
+/*
 impl Op {
     fn to_asm(&self, alloc: &mut RegAlloc, ctx: &Ctx) -> Vec<AsmOp> {
         let vars = &ctx.vars;
@@ -318,18 +262,6 @@ impl Op {
                 ret.extend_from_slice(&alloc.setup_call(&target.args, CallType::Block));
                 ret.push(AsmOp::Jmp(OpTarget::Label(target.id)));
             }
-            OpInner::Add {
-                dst,
-                lhs: op1,
-                rhs: op2,
-            } => {
-                let regl = alloc.move_to_reg(*op1);
-                let regr = alloc.move_to_reg(*op2);
-                ret.extend_from_slice(&alloc.take_queue());
-                ret.push(AsmOp::Add(OpTarget::Reg(regl), OpTarget::Reg(regr)));
-                ret.push(AsmOp::Comment(format!(" ^^^ {dst} := {op1} + {op2}",)));
-                alloc.force_reg(*dst, regl);
-            }
             OpInner::RegAllocOp(op) => {
                 alloc.apply_op(op);
                 ret.extend_from_slice(&alloc.take_queue());
@@ -355,6 +287,9 @@ impl Op {
                 };
                 ret.push(AsmOp::Mov(OpTarget::Stack(odst), OpTarget::Reg(rsrc)))
             }
+            OpInner::Op { ins } => {
+
+            },
         }
         ret
     }
@@ -374,9 +309,6 @@ impl Op {
                     .chain(success.args.iter().copied().chain(fail.args.iter().copied())),
             ),
             OpInner::Jmp { target } => target.args.iter().copied().collect(),
-            OpInner::RegAllocOp(_) => {
-                panic!("vars_referenced should not be called after reg ops added")
-            }
             OpInner::Load { loc, ptr } => {
                 vec![*loc, *ptr]
             }
@@ -427,7 +359,19 @@ impl Op {
             _ => false
         }
     }
+
+    #[must_use]
+    fn is_term(&self) -> bool {
+        match self.inner {
+            OpInner::Br { .. } => true,
+            OpInner::Jmp { .. } => true,
+            OpInner::Op { ins } => ins.is_branch,
+            OpInner::Call { .. } => true,
+            _ => false
+        }
+    }
 }
+*/
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CallType {

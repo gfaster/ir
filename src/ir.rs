@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::instr::*;
 
 
-const IR_INSTRUCTIONS: [&'static InstrProp; 7] = [
+const IR_INSTRUCTIONS: [&'static MachineInstrProp; 7] = [
     &ADD,
     &MUL,
     &LT,
@@ -13,8 +13,8 @@ const IR_INSTRUCTIONS: [&'static InstrProp; 7] = [
     &BR,
 ];
 
-pub fn instruction_map() -> &'static HashMap<&'static str, &'static InstrProp> {
-    static mut MAP: Option<HashMap<&'static str, &'static InstrProp>> = None;
+pub fn instruction_map() -> &'static HashMap<&'static str, &'static MachineInstrProp> {
+    static mut MAP: Option<HashMap<&'static str, &'static MachineInstrProp>> = None;
     // SAFETY: only one thread for now
     unsafe {
         if let Some(m) = &MAP {
@@ -47,7 +47,7 @@ macro_rules! new_template {
     };
 }
 
-const BASE_OP: InstrProp = InstrProp {
+const BASE_OP: MachineInstrProp = MachineInstrProp {
     op_cnt: 0,
     mnemonic: "[TEMPLATE]",
     is_branch: false,

@@ -1,3 +1,4 @@
+use crate::instr::{Target, Function};
 use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -5,7 +6,7 @@ use std::{
     rc::Rc,
 };
 
-use crate::{unique_label, GlobalData, Binding, Op, OpInner, Routine, Target, Val, VarSet, IdTy, BlockId, instr::Instruction, ir::instruction_map, new_block_id};
+use crate::{unique_label, GlobalData, Binding, Val, VarSet, IdTy, BlockId, instr::{MachineInstruction, InstructionTemplate, OpInner}, ir::instruction_map};
 
 use self::rules::{collect_decl_args, Rule};
 
@@ -661,7 +662,7 @@ pub(crate) struct Parser {
 }
 
 pub(crate) struct ParsedFile {
-    pub routine: Routine,
+    pub routine: Function,
     pub vars: VarSet,
     pub globals: BTreeMap<Binding, GlobalData>,
 }
@@ -717,7 +718,7 @@ impl Parser {
         idents: &mut BindMap,
         globals: &mut BTreeMap<Binding, GlobalData>,
         stmt: rules::Statement,
-    ) -> Op {
+    ) -> InstructionTemplate {
         let inner: OpInner = match stmt {
             rules::Statement::Assign(rules::AssignStatement(dst, _, src)) => {
                 let loc = idents.assign(dst);
@@ -752,7 +753,7 @@ impl Parser {
                         let op1 = idents.lookup(lhs);
                         let op2 = idents.lookup(rhs);
                         let op = instruction_map()[ty.as_ref()];
-                        let mut ins = Instruction::new(op);
+                        let mut ins = MachineInstruction::new(op);
                         ins.push_ops([loc, op1, op2]);
                         OpInner::Op { ins }
                     }
@@ -801,10 +802,9 @@ impl Parser {
                 dst: idents.lookup(dst),
             },
         };
-        Op {
+        InstructionTemplate {
             inner,
-            fileno: 0,
-            line: 0,
+            dbg_info: None
         }
     }
 
@@ -812,7 +812,7 @@ impl Parser {
         let rules::FunctionDef(_, _, fn_name, args, _) = self.expect::<rules::FunctionDef>();
         let args = rules::collect_decl_args(args);
         let mut idents = BindMap::new(Binding::new_virtual);
-        let mut blocks = BlockMap::new(new_block_id);
+        let mut blocks = BlockMap::new(BlockId::new);
         for (_, arg) in args {
             idents.assign(arg);
         }
@@ -824,10 +824,7 @@ impl Parser {
             ops.push(self.process_statement(&mut blocks, &mut idents, &mut globals, stmt));
         }
         self.expect::<rules::CloseCurly>();
-        let routine = Routine {
-            name: fn_name.as_ref()[1..].into(),
-            ops,
-        };
+        let routine = Function::from_iter( fn_name.as_ref()[1..], ops);
         idents.assert_all_initialized(&globals);
         ParsedFile {
             routine,

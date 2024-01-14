@@ -1,16 +1,10 @@
-use crate::reg::{Binding, MachineReg};
+use std::{rc::{Rc, Weak}, cell::Cell};
 
+use crate::{reg::{Binding, MachineReg, BlockId, BankState}, Id, vec_map::{VecMap, VecSet}};
 
 /// properties of a instruction
-pub struct InstrProp {
-    pub op_cnt: u8,
-    /// assembly mnemonic
-    pub mnemonic: &'static str,
-    pub is_branch: bool,
-    pub is_terminator: bool,
-
-    /// if this instruction can be safely re-ordered with identical instructions
-    pub is_commutative: bool,
+pub struct MachineInstrProp {
+    pub basic: BasicInstrProp,
 
     /// constant registers written to by this instruction (e.g. `EFLAGS`)
     ///
@@ -51,7 +45,7 @@ pub struct InstrProp {
     pub operand_relative_type_constraints: &'static [u8],
 }
 
-impl InstrProp {
+impl MachineInstrProp {
     pub const fn assert_makes_sense(&self) {
         let p = self;
         assert!(p.op_cnt as usize >= p.set_regs.len());
@@ -64,31 +58,172 @@ impl InstrProp {
     }
 }
 
+
+pub enum ArgCnt {
+    Unknown,
+    Variable,
+    Known(u8)
+}
+
+#[derive(Debug)]
+pub enum ArgClass {
+    /// list of defined bindings
+    ArgList,
+    /// Any binding / register
+    Binding,
+    /// Label binding + arguments
+    Target,
+}
+
+#[derive(Debug)]
+pub struct BasicInstrProp {
+    /// input argument count
+    pub arg_cnt: ArgCnt,
+
+    /// classes of arguments - this is broad (grammatical level), and doesn't concern itself with
+    /// specific types. Should only be None if arg_cnt is unknown.
+    pub arg_classes: Option<&'static [ArgClass]>,
+
+    /// output (defined registers) count
+    pub res_cnt: u8,
+
+    /// assembly mnemonic
+    pub mnemonic: &'static str,
+
+    /// whether this instruction is a branch, implies `is_terminator`
+    pub is_branch: bool,
+
+    /// whether this instruction is a terminator, implied by `is_branch`
+    pub is_terminator: bool,
+
+    /// whether this instruction can start a block
+    pub is_block_header: bool,
+
+    /// if this the operands of this instruction can be safely reordered
+    ///
+    /// For example: integer addition is probably commutative, but subtraction isn't
+    pub is_commutative: bool,
+
+    /// if this instruction can be safely re-ordered with identical instructions. Any instruction
+    /// that may cause an exception (eg division, function calls) will have this set. I may want to think about
+    /// moving this to a function since live ranges and metadata could change this.
+    pub has_side_effects: bool,
+
+    pub may_read_memory: bool,
+    pub may_write_memory: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstrInputs {
+    None,
+    Unary(Binding),
+    Binary(Binding, Binding),
+    Many(Vec<Binding>),
+}
+
+impl InstrInputs {
+    fn new() -> Self {
+        Self::None
+    }
+    #[must_use]
+    fn len(&self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::Unary(_) => 1,
+            Self::Binary(_, _) => 2,
+            Self::Many(v) => v.len(),
+        }
+    }
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    #[must_use]
+    fn get(&self, idx: usize) -> Option<Binding> {
+        match self {
+            Self::None => None,
+            Self::Unary(op1) => [*op1].get(idx).copied(),
+            Self::Binary(op1, op2) => [*op1, *op2].get(idx).copied(),
+            Self::Many(v) => v.get(idx).copied(),
+        }
+    }
+    fn push(&mut self, bind: Binding) {
+        match self {
+            Self::None => *self = Self::Unary(bind),
+            Self::Unary(op1) => *self = Self::Binary(*op1, bind),
+            Self::Binary(op1, op2) => *self = Self::Many(vec![*op1, *op2, bind]),
+            Self::Many(v) => v.push(bind),
+        }
+    }
+
+    fn iter(&self) -> InstrInputsIter {
+        InstrInputsIter { list: self, idx: 0 }
+    }
+}
+
+impl<'a> From<&'a [Binding]> for InstrInputs {
+    fn from(value: &'a [Binding]) -> Self {
+        let mut ret = Self::new();
+        for x in value {
+            ret.push(*x);
+        }
+        ret
+    }
+}
+
+impl<const L: usize> From<[Binding; L]> for InstrInputs {
+    fn from(value: [Binding; L]) -> Self {
+        match value.len() {
+            0 => Self::None,
+            1 => Self::Unary(value[0]),
+            2 => Self::Binary(value[0], value[1]),
+            _ => Self::Many(Vec::from(value))
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a InstrInputs {
+    type Item = Binding;
+
+    type IntoIter = InstrInputsIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+struct InstrInputsIter<'a>{
+    list: &'a InstrInputs,
+    idx: usize,
+}
+
+impl<'a> Iterator for InstrInputsIter<'a> {
+    type Item = Binding;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let ret = self.list.get(self.idx)?;
+        self.idx += 1;
+        Some(ret)
+    }
+}
+
+
 #[derive(Debug, Clone, Copy)]
 pub struct DebugInfo {
 }
 
-pub struct Instruction {
+#[derive(Clone)]
+pub struct MachineInstruction {
     /// the type of instruction this is, and all of its static properties
-    op: &'static InstrProp,
+    op: &'static MachineInstrProp,
     operands: Vec<Binding>,
-    dbg_info: Option<DebugInfo>,
 }
 
-impl std::ops::Deref for Instruction {
-    type Target = &'static InstrProp;
-
-    fn deref(&self) -> &Self::Target {
-        &self.op
-    }
-}
-
-impl Instruction {
-    pub fn new(op: &'static InstrProp) -> Self {
+impl MachineInstruction {
+    pub fn new(op: &'static MachineInstrProp) -> Self {
         Self {
             op,
             operands: Vec::new(),
-            dbg_info: None,
         }
     }
 
@@ -125,13 +260,13 @@ impl Instruction {
     }
 }
 
-impl std::fmt::Debug for Instruction {
+impl std::fmt::Debug for MachineInstruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         <Self as std::fmt::Display>::fmt(self, f)
     }
 }
 
-impl std::fmt::Display for Instruction {
+impl std::fmt::Display for MachineInstruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut it = self.set_registers().peekable();
         while let Some(r) = it.next() {
@@ -149,5 +284,479 @@ impl std::fmt::Display for Instruction {
             }
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Target {
+    pub id: Binding,
+    pub args: InstrInputs,
+}
+
+impl Target {
+    fn read_registers(&self) -> impl Iterator<Item = Binding> + '_ {
+        std::iter::once(self.id).chain(&self.args)
+    }
+}
+
+/// instruction id, currently not used
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct InstrId(usize);
+impl InstrId {
+    fn new() -> Self {
+        static CNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        InstrId(CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+/// an [`Instruction`] without the linked-list
+#[derive(Debug, Clone)]
+pub struct InstructionTemplate {
+    pub dbg_info: Option<DebugInfo>,
+    pub inner: OpInner,
+}
+
+impl From<InstructionTemplate> for Instruction {
+    fn from(value: InstructionTemplate) -> Self {
+        Self {
+            next: Cell::new(None),
+            prev: Cell::new(None),
+            dbg_info: value.dbg_info,
+            inner: value.inner,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Instruction {
+    next: Cell<Option<Rc<Instruction>>>,
+    prev: Cell<Option<Weak<Instruction>>>,
+    dbg_info: Option<DebugInfo>,
+    inner: OpInner,
+}
+
+impl Clone for Instruction {
+    fn clone(&self) -> Self {
+        Instruction { 
+            next: Cell::new(None), 
+            prev: Cell::new(None), 
+            dbg_info: self.dbg_info.clone(), 
+            inner: self.inner.clone()
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum OpInner {
+    /// treated as a unary instruction 
+    Call {
+        id: Id,
+        args: InstrInputs,
+    },
+    Load {
+        loc: Binding,
+        ptr: Binding,
+    },
+    Block {
+        id: BlockId,
+        args: InstrInputs,
+    },
+    Br {
+        check: Binding,
+        success: Target,
+        fail: Target,
+    },
+    MachInstr {
+        ins: MachineInstruction,
+    },
+    Jmp {
+        target: Target,
+    },
+    Store {
+        dst: Binding,
+        src: Binding,
+    },
+}
+
+impl Instruction {
+    fn basic_props(&self) -> &'static BasicInstrProp {
+        // conservative instruction properties
+        const TEMPLATE: BasicInstrProp = BasicInstrProp {
+            arg_cnt: ArgCnt::Unknown,
+            arg_classes: None,
+            res_cnt: 0,
+            mnemonic: "[[TEMPLATE]]",
+            is_branch: false,
+            is_terminator: false,
+            is_block_header: false,
+            is_commutative: false,
+            has_side_effects: true,
+            may_read_memory: true,
+            may_write_memory: true,
+        };
+        match self.inner {
+            OpInner::Call { id, args } => &BasicInstrProp { 
+                arg_cnt: ArgCnt::Known(1),
+                res_cnt: 1,
+                mnemonic: "call",
+                is_branch: true,
+                is_terminator: true,
+                ..TEMPLATE
+            },
+            OpInner::Load { loc, ptr } => &BasicInstrProp {
+                arg_cnt: ArgCnt::Known(1),
+                res_cnt: 1,
+                mnemonic: "load",
+                has_side_effects: false,
+                may_read_memory: true,
+                ..TEMPLATE
+            },
+            OpInner::Block { id, args } => &BasicInstrProp {
+                arg_cnt: ArgCnt::Known(0),
+                res_cnt: 0,
+                mnemonic: "label",
+                is_block_header: true,
+                has_side_effects: false,
+                may_read_memory: false,
+                may_write_memory: false,
+                ..TEMPLATE
+            },
+            OpInner::Br { check, success, fail } => &BasicInstrProp {
+                arg_cnt: ArgCnt::Known(3),
+                res_cnt: 0,
+                mnemonic: "br",
+                is_branch: true,
+                is_terminator: true,
+                is_commutative: false,
+                has_side_effects: false,
+                may_read_memory: false,
+                may_write_memory: false,
+                ..TEMPLATE
+            },
+            OpInner::MachInstr { ins } => &ins.op.basic,
+            OpInner::Jmp { target } => &BasicInstrProp{
+                arg_cnt: ArgCnt::Known(1),
+                res_cnt: 0,
+                mnemonic: "br",
+                is_branch: true,
+                is_terminator: true,
+                is_commutative: false,
+                has_side_effects: false,
+                may_read_memory: false,
+                may_write_memory: false,
+                ..TEMPLATE
+            },
+            OpInner::Store { dst, src } => &BasicInstrProp {
+                arg_cnt: ArgCnt::Known(1),
+                res_cnt: 1,
+                mnemonic: "store",
+                has_side_effects: false,
+                may_read_memory: false,
+                may_write_memory: true,
+                ..TEMPLATE
+            },
+        }
+    }
+
+    pub fn is_term(&self) -> bool {
+        self.basic_props().is_terminator
+    }
+
+    pub fn is_branch(&self) -> bool {
+        self.basic_props().is_branch
+    }
+
+    pub fn is_block_header(&self) -> bool {
+        self.basic_props().is_block_header
+    }
+
+    pub fn mnemonic(&self) -> &'static str {
+        self.basic_props().mnemonic
+    }
+
+    pub fn has_side_effects(&self) -> bool {
+        self.basic_props().has_side_effects
+    }
+
+    pub fn arg_cnt(&self) -> u8 {
+        let ArgCnt::Known(cnt) = self.basic_props().arg_cnt else {
+            panic!("all instructions should have known arg cnt")
+        };
+        cnt
+    }
+
+    pub fn defined_bindings(&self) -> impl Iterator<Item = Binding> + '_ {
+        let ret: Box<dyn Iterator<Item = Binding>> = match &self.inner {
+            OpInner::Call { id, args } => Box::new([].into_iter()),
+            OpInner::Load { loc, ptr } => Box::new([*loc].into_iter()),
+            OpInner::Block { id, args } => Box::new([(*id).into()].into_iter().chain(args.iter())),
+            OpInner::Br { check, success, fail } => Box::new([].into_iter()),
+            OpInner::MachInstr { ins } => Box::new(ins.set_registers()),
+            OpInner::Jmp { target } => Box::new([].into_iter()),
+            OpInner::Store { dst, src } => Box::new([].into_iter()),
+        };
+        ret
+    }
+
+    pub fn read_bindings(&self) -> impl Iterator<Item = Binding> + '_ {
+        let ret: Box<dyn Iterator<Item = Binding>> = match &self.inner {
+            OpInner::Call { id, args } => Box::new(args.into_iter()),
+            OpInner::Load { loc, ptr } => Box::new([*ptr].into_iter()),
+            OpInner::Block { id, args } => Box::new([].into_iter()),
+            OpInner::Br { check, success, fail } => 
+                Box::new([*check].into_iter()
+                    .chain(success.read_registers())
+                    .chain(fail.read_registers())),
+            OpInner::MachInstr { ins } => Box::new(ins.read_registers()),
+            OpInner::Jmp { target } => Box::new([].into_iter()),
+            OpInner::Store { dst, src } => Box::new([*dst, *src].into_iter()),
+        };
+        ret
+    }
+
+    pub fn jump_dsts(&self) -> impl Iterator<Item = Binding> + '_ {
+        let ret: Box<dyn Iterator<Item = Binding>> = match &self.inner {
+            OpInner::Jmp { target } => Box::new([target.id].into_iter()),
+            OpInner::Br { success, fail, ..  } => Box::new([success.id, fail.id].into_iter()),
+            _ => Box::new([].into_iter())
+        };
+        ret
+    }
+
+    /// whether two instructions (assumed to be adjacent) may be swapped. 
+    ///
+    /// Note that this is not necessarily transitive.
+    pub fn may_commute(fst: &Self, snd: &Self) -> bool {
+        (!fst.has_side_effects() || !snd.has_side_effects()) &&
+        (!fst.is_block_header() && !snd.is_block_header()) &&
+        (!fst.is_term() && !snd.is_term()) && {
+
+        }
+    }
+}
+
+impl Instruction {
+    fn detach(&self) -> (Option<Rc<Self>>, Option<Rc<Self>>) {
+        let prev = self.prev.take().and_then(|ptr| ptr.upgrade());
+        let next = self.next.take();
+        if let Some(ref prev) = prev {
+            prev.next.set(next)
+        }
+        if let Some(ref next) = next {
+            next.prev.set(next)
+        }
+        (prev, next)
+    }
+
+    fn is_detached(&self) -> bool {
+        self.take_prev().is_none() && self.take_next().is_none()
+    }
+
+    /// returns true if both previous and next instructions are properly linked
+    fn link_is_valid(self: &Rc<Self>) -> bool {
+        if let Some(prev) = self.take_prev() {
+            let Some(prev_next) = prev.take_next() else { return false };
+            if !Rc::ptr_eq(self, &prev_next) {
+                return false;
+            }
+        };
+        if let Some(next) = self.take_next() {
+            let Some(next_prev) = next.take_prev() else { return false };
+            if !Rc::ptr_eq(&self, &next_prev) {
+                return false;
+            }
+        };
+        true
+    }
+
+    fn is_valid_instr(&self) -> bool {
+        let has_prev = self.take_prev().is_some();
+        let has_next = self.take_next().is_some();
+        let is_header = self.is_block_header();
+        let is_term = self.is_term();
+
+        if !has_prev && !is_header {
+            return false;
+        }
+        if has_prev && is_header {
+            return false;
+        }
+        if !has_next && !is_term {
+            return false;
+        }
+        if has_next && is_term {
+            return false;
+        }
+        true
+    }
+
+    fn take_prev(&self) -> Option<Rc<Instruction>> {
+        let ret = self.prev.take().and_then(|p| p.upgrade());
+        if let Some(ref prev) = ret {
+            self.prev.set(Some(Rc::downgrade(prev)))
+        }
+        ret
+    }
+
+    fn take_next(&self) -> Option<Rc<Instruction>> {
+        let ret = self.next.take();
+        if let Some(ref next) = ret {
+            self.next.set(Some(Rc::clone(next)));
+        }
+        ret
+    }
+
+    fn insert_before(self: &Rc<Self>, instr: Rc<Instruction>) {
+        debug_assert!(!instr.is_term());
+        debug_assert!(instr.is_detached());
+        debug_assert!(self.link_is_valid());
+        let prev = self.take_prev();
+        if let Some(prev) = prev {
+            debug_assert!(!self.is_block_header());
+            prev.next.set(Some(Rc::clone(&instr)));
+            instr.prev.set(Some(Rc::downgrade(&prev)));
+        }
+        instr.next.set(Some(Rc::clone(self)));
+        self.prev.set(Some(instr));
+    }
+
+    fn insert_after(self: &Rc<Self>, instr: Rc<Instruction>) {
+        debug_assert!(!instr.is_term());
+        debug_assert!(!self.is_term());
+        debug_assert!(instr.is_detached());
+        debug_assert!(self.link_is_valid());
+        let next = self.take_next();
+        if let Some(next) = next {
+            debug_assert!(!self.is_block_header());
+            next.prev.set(Some(Rc::downcast(&instr)));
+            instr.next.set(Some(next));
+        }
+        instr.prev.set(Some(Rc::downgrade(self)));
+        self.next.set(Some(instr));
+    }
+
+    fn append_unfinished(self: &Rc<Self>, instr: Rc<Instruction>) {
+        instr.prev.set(Some(Rc::downgrade(self)));
+        self.next.set(Some(instr));
+    }
+}
+
+impl OpInner {
+    fn as_mach_instr(&self) -> Option<&MachineInstruction> {
+        if let Self::MachInstr { ins } = self {
+            Some(ins)
+        } else {
+            None
+        }
+    }
+
+    fn as_block_id(&self) -> Option<BlockId> {
+        if let Self::Block { id, .. } = self {
+            Some(*id)
+        } else {
+            None
+        }
+    }
+}
+
+pub struct BasicBlock {
+    id: BlockId,
+    pred: VecSet<usize>,
+    head: Rc<Instruction>,
+    tail: Rc<Instruction>,
+    seq: VecSet<usize>,
+}
+
+impl BasicBlock {
+    fn is_valid(&self) -> bool {
+        let mut instr = Some(&self.head);
+        while let Some(i) = instr {
+            if !i.is_valid_instr() || !i.link_is_valid() {
+                return false
+            }
+            if Rc::ptr_eq(i, &self.tail) && !i.is_term() {
+                return false
+            }
+        }
+        true
+    }
+
+    fn split_function(instrs: impl IntoIterator<Item = InstructionTemplate>) -> Result<Vec<BasicBlock>, ()> {
+        let mut it = instrs.into_iter().map(|t| t.into());
+        let mut blocks: VecMap<BlockId, BasicBlock> = VecMap::new();
+        loop {
+            let Some(head) = it.next() else { break };
+            let head = Rc::new(head);
+            let Some(id) = head.inner.as_block_id() else { return Err(()) };
+            let mut curr = Rc::clone(&head);
+            while let Some(next) = it.next() {
+                let next = Rc::new(next);
+                curr.append_unfinished(Rc::clone(&next));
+                curr = next;
+                if curr.is_term() {
+                    break;
+                }
+            }
+            let repl = blocks.insert(id, BasicBlock {
+                id,
+                pred: Vec::new(),
+                head,
+                tail: curr,
+                seq: Vec::new(),
+            });
+            debug_assert!(repl.is_none(), "duplicate definition");
+        }
+        let ids: Vec<_> = blocks.keys().copied().collect();
+        for id in ids {
+            let seq_ids: Vec<_> = blocks[&id].tail.jump_dsts().map(|x| x.as_label()
+                .expect("Non-label jump targets are not supported")).collect();
+            let mut seq_idxs = Vec::new();
+            let idx = blocks.get_index(&id).unwrap();
+            for &seq in &seq_ids {
+                blocks[seq].pred.insert(idx);
+                let Some(seq) = blocks.get_index(seq) else {
+                    panic!("block {seq} was defined in a different function");
+                };
+                seq_idxs.push(seq);
+            }
+            blocks[&id].seq.extend(seq_idxs.iter().copied());
+        }
+
+        Ok(blocks.into_value_vec())
+    }
+
+    fn iter(&self) -> BlockInstrIter {
+        BlockInstrIter { curr: Some(Rc::clone(&self.head)) }
+    }
+}
+
+struct BlockInstrIter {
+    curr: Option<Rc<Instruction>>
+}
+
+impl Iterator for BlockInstrIter {
+    type Item = Rc<Instruction>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let ret = self.curr.take()?;
+        self.curr = ret.take_next();
+        Some(ret)
+    }
+}
+
+pub struct Function {
+    name: Box<str>,
+    blocks: Vec<BasicBlock>,
+    reg_state: BankState,
+}
+
+impl Function {
+    pub fn from_iter(name: impl Into<Box<str>>, instrs: impl IntoIterator<Item = InstructionTemplate>) -> Self {
+        let blocks = BasicBlock::split_function(instrs);
+        Function { name: name.into(), blocks, reg_state: Default::default() }
+    }
+
+    fn build_defuse(&mut self) {
+
     }
 }
