@@ -36,14 +36,6 @@ type Id = usize;
 
 type VarSet = Rc<BTreeSet<Binding>>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocType {
-    StaticStackPtr(usize),
-    StaticPtr(usize),
-    Ptr,
-    Var,
-}
-
 type IdTy = usize;
 
 
@@ -66,12 +58,21 @@ struct Ctx {
     pub globals: BTreeMap<Binding, GlobalData>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 enum Val {
-    GlobalLabel(Binding),
+    GlobalBinding(Binding),
     Binding(Binding),
     Literal(u64),
-    Alloca(Type),
+}
+
+impl Val {
+    pub fn as_binding(&self) -> Option<Binding> {
+        match self {
+            Val::GlobalBinding(b) => Some(*b),
+            Val::Binding(b) => Some(*b),
+            Val::Literal(_) => None,
+        }
+    }
 }
 
 struct GlobalData {

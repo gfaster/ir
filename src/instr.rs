@@ -1,59 +1,58 @@
 use std::{rc::{Rc, Weak}, cell::Cell};
 
-use crate::{reg::{Binding, MachineReg, BlockId, BankState}, Id, vec_map::{VecMap, VecSet}};
+use crate::{reg::{Binding, MachineReg, BlockId, SSAState, PhysRegUse}, Id, vec_map::{VecMap, VecSet}, Val};
 
-/// properties of a instruction
+/// Properties of a instruction. Note that equality is only checked by pointer, which should be
+/// fine since they should only ever be defined as constants.
 pub struct MachineInstrProp {
     pub basic: BasicInstrProp,
 
-    /// constant registers written to by this instruction (e.g. `EFLAGS`)
-    ///
-    /// corresponds 1:1 to the first operands in IR representation
-    pub set_regs: &'static [MachineReg],
+    /// constant registers (implicitly) referenced this instruction (e.g. `EFLAGS`)
+    pub ref_regs: &'static [(MachineReg, PhysRegUse)],
 
-    /// constant registers read by this instruction (e.g. `EFLAGS`)
-    ///
-    /// is mutually exclusive with read operands
-    pub read_regs: &'static [MachineReg],
+    /// how this instruction interacts with operands
+    pub operand_use: &'static [PhysRegUse],
 
-    /// Operand indices written to by this instruction
+    /// Operand identity classes
     ///
-    /// For example, take the following `RISC-V` instruction:
-    /// ```riscv
-    /// add r1, r2, r3
+    /// For example, take the following x86 instruction:
+    /// ```x86asm
+    /// add r1, r2
+    /// // represented like:
+    /// // r1 = add r1, r2
     /// ```
-    /// then `set_operands` would be `&[0]` since only the first register is changed
-    pub set_operands: &'static [u8],
-
-    /// operand indices read by this instruction
-    ///
-    /// For example, take the following RISC-V instruction:
-    /// ```riscv
-    /// add r1, r2, r3
-    /// ```
-    /// then `read_operands` would be `&[1, 2]` since only the 2nd and 3rd operands are read.
-    pub read_operands: &'static [u8],
-
-    /// Groups of operands that must be the same type.
-    ///
-    /// For example, take the following RISC-V instruction:
-    /// ```riscv
-    /// add r1, r2, r3
-    /// ```
-    /// then `operand_relative_type_constraints` would be `&[0, 0, 0]` since all operands have to
-    /// be the same type.
-    pub operand_relative_type_constraints: &'static [u8],
+    /// This is represented as a 3-operand instruction, but the destination operand and the first
+    /// source operand are in the same register. In this case, `op_eq_constraints` would be 
+    /// `&[0, 0, 1]`.
+    pub op_eq_constraints: &'static [u8],
 }
+
+impl std::cmp::PartialEq for MachineInstrProp {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+impl std::cmp::Eq for MachineInstrProp {}
 
 impl MachineInstrProp {
     pub const fn assert_makes_sense(&self) {
         let p = self;
-        assert!(p.op_cnt as usize >= p.set_regs.len());
-        assert!(p.op_cnt as usize >= p.read_operands.len());
-        assert!(p.op_cnt as usize >= p.set_operands.len());
-        assert!(p.op_cnt as usize == p.operand_relative_type_constraints.len());
-        assert!(!p.is_branch || !p.is_commutative);
-        assert!(!p.is_terminator || !p.is_commutative);
+        p.basic.assert_makes_sense();
+        assert!(p.basic.total_ops() as usize == p.operand_use.len());
+        assert!(p.basic.total_ops() as usize == p.op_eq_constraints.len());
+    }
+
+    pub const fn implicit_op_cnt(&self) -> usize {
+        self.ref_regs.len()
+    }
+}
+
+impl BasicInstrProp {
+    pub const fn total_ops(&self) -> u8 {
+        self.res_cnt + self.op_cnt
+    }
+    pub const fn assert_makes_sense(&self) {
+        let p = self;
         assert!(!p.is_branch || p.is_terminator);
     }
 }
@@ -75,16 +74,15 @@ pub enum ArgClass {
     Target,
 }
 
+/// Basic properties of an instruction.
+///
+/// `Eq` is implemented for these, but is done by ptr compare.
 #[derive(Debug)]
 pub struct BasicInstrProp {
-    /// input argument count
-    pub arg_cnt: ArgCnt,
+    /// argument count, total number of operands needs to add `res_cnt`
+    pub op_cnt: u8,
 
-    /// classes of arguments - this is broad (grammatical level), and doesn't concern itself with
-    /// specific types. Should only be None if arg_cnt is unknown.
-    pub arg_classes: Option<&'static [ArgClass]>,
-
-    /// output (defined registers) count
+    /// output (defined registers) count. For now I want to force this to be 1.
     pub res_cnt: u8,
 
     /// assembly mnemonic
@@ -111,7 +109,26 @@ pub struct BasicInstrProp {
 
     pub may_read_memory: bool,
     pub may_write_memory: bool,
+
+    /// Groups of operands that must be the same type.
+    ///
+    /// For example, take the following RISC-V instruction:
+    /// ```riscv
+    /// add r1, r2, r3
+    /// ```
+    /// then `operand_relative_type_constraints` would be `&[0, 0, 0]` since all operands have to
+    /// be the same type.
+    ///
+    /// Also note that this only enforces matching types, and won't ensure two types are different
+    pub operand_relative_type_constraints: &'static [u8],
 }
+
+impl std::cmp::PartialEq for BasicInstrProp {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+impl std::cmp::Eq for BasicInstrProp {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstrInputs {
@@ -182,6 +199,26 @@ impl<const L: usize> From<[Binding; L]> for InstrInputs {
     }
 }
 
+impl FromIterator<Binding> for InstrInputs {
+    fn from_iter<T: IntoIterator<Item = Binding>>(iter: T) -> Self {
+        let mut ret = Self::new();
+        for item in iter {
+            ret.push(item)
+        }
+        ret
+    }
+}
+
+impl<'a> FromIterator<&'a Binding> for InstrInputs {
+    fn from_iter<T: IntoIterator<Item = &'a Binding>>(iter: T) -> Self {
+        let mut ret = Self::new();
+        for &item in iter {
+            ret.push(item)
+        }
+        ret
+    }
+}
+
 impl<'a> IntoIterator for &'a InstrInputs {
     type Item = Binding;
 
@@ -215,44 +252,32 @@ pub struct DebugInfo {
 #[derive(Clone)]
 pub struct MachineInstruction {
     /// the type of instruction this is, and all of its static properties
-    op: &'static MachineInstrProp,
-    operands: Vec<Binding>,
+    props: &'static MachineInstrProp,
+    operands: InstrInputs,
 }
 
 impl MachineInstruction {
     pub fn new(op: &'static MachineInstrProp) -> Self {
         Self {
-            op,
-            operands: Vec::new(),
+            props: op,
+            operands: InstrInputs::new(),
         }
     }
 
-    pub fn push_op(&mut self, op: Binding) -> &mut Self {
-        assert!(self.operands.len() < self.op.op_cnt as usize);
-        self.operands.push(op);
-        self
+    fn op_use_iter(&self) -> impl Iterator<Item = (Binding, PhysRegUse)> + '_ {
+        self.operands.iter().zip(self.props.operand_use.iter().copied())
     }
 
-    pub fn push_ops(&mut self, op: impl IntoIterator<Item = Binding>) -> &mut Self {
-        self.operands.extend(op);
-        assert!(self.operands.len() <= self.op.op_cnt as usize);
-        self
-    }
-
-    pub fn is_valid(&self) -> bool {
-        self.operands.len() == self.op.op_cnt as usize
+    fn implicit_op_use_iter(&self) -> impl Iterator<Item = (Binding, PhysRegUse)> + '_ {
+        self.props.ref_regs.iter().map(|&(r, u)| (r.into(), u))
     }
 
     pub fn read_registers(&self) -> impl Iterator<Item = Binding> + '_ {
-        debug_assert!(self.is_valid());
-        self.op.read_operands.iter().map(|&r| self.operands[r as usize])
-            .chain(self.op.read_regs.iter().map(|&r| r.into()))
+        self.op_use_iter().chain(self.implicit_op_use_iter()).filter(|(_, u)| u.is_read()).map(|(r, _)| r)
     }
 
-    pub fn set_registers(&self) -> impl Iterator<Item = Binding> + '_ {
-        debug_assert!(self.is_valid());
-        self.op.set_operands.iter().map(|&r| self.operands[r as usize])
-            .chain(self.op.set_regs.iter().map(|&r| r.into()))
+    pub fn def_registers(&self) -> impl Iterator<Item = Binding> + '_ {
+        self.op_use_iter().chain(self.implicit_op_use_iter()).filter(|(_, u)| u.is_defined()).map(|(r, _)| r)
     }
 
     pub fn read_phys_regs(&self) -> impl Iterator<Item = MachineReg> + '_ {
@@ -268,14 +293,14 @@ impl std::fmt::Debug for MachineInstruction {
 
 impl std::fmt::Display for MachineInstruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut it = self.set_registers().peekable();
+        let mut it = self.def_registers().peekable();
         while let Some(r) = it.next() {
             write!(f, "%{r}")?;
             if it.peek().is_some() {
                 write!(f, ", ")?;
             }
         }
-        write!(f, " = {} ", self.op.mnemonic)?;
+        write!(f, " = {} ", self.props.basic.mnemonic)?;
         let mut it = self.read_registers().peekable();
         while let Some(r) = it.next() {
             write!(f, "%{r}")?;
@@ -316,9 +341,25 @@ pub struct InstructionTemplate {
     pub inner: OpInner,
 }
 
+impl InstructionTemplate {
+    /// for now, all IR instruction are binary operations with one output
+    pub fn from_binary_op(res: Binding, op: impl AsRef<str>, lhs: Binding, rhs: Binding ) -> Option<Self> {
+        let &prop = crate::ir::instruction_map().get(op.as_ref())?;
+        let args: InstrInputs = [res, lhs, rhs].into();
+        Some(InstructionTemplate {
+            dbg_info: None,
+            inner: OpInner::IrInstr { 
+                prop,
+                ops: args
+            }
+        })
+    }
+}
+
 impl From<InstructionTemplate> for Instruction {
     fn from(value: InstructionTemplate) -> Self {
         Self {
+            id: InstructionId::new(),
             next: Cell::new(None),
             prev: Cell::new(None),
             dbg_info: value.dbg_info,
@@ -327,17 +368,47 @@ impl From<InstructionTemplate> for Instruction {
     }
 }
 
-#[derive(Debug)]
+/// Universally unique instruction id. Used for equality of instructions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct InstructionId(usize);
+
+impl InstructionId {
+    fn new() -> Self {
+        use std::sync::atomic;
+        static CNT: atomic::AtomicUsize = atomic::AtomicUsize::new(0);
+        Self(CNT.fetch_add(1, atomic::Ordering::Relaxed))
+    }
+}
+
 pub struct Instruction {
+    id: InstructionId,
     next: Cell<Option<Rc<Instruction>>>,
     prev: Cell<Option<Weak<Instruction>>>,
     dbg_info: Option<DebugInfo>,
     inner: OpInner,
 }
 
+impl std::cmp::PartialEq for Instruction {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl std::cmp::Eq for Instruction {}
+
+impl std::fmt::Debug for Instruction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(std::any::type_name::<Self>())
+            .field("dbg_info", &self.dbg_info)
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
 impl Clone for Instruction {
     fn clone(&self) -> Self {
         Instruction { 
+            id: InstructionId::new(),
             next: Cell::new(None), 
             prev: Cell::new(None), 
             dbg_info: self.dbg_info.clone(), 
@@ -346,12 +417,27 @@ impl Clone for Instruction {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AllocationType {
+    Stack,
+    Heap
+}
+
 #[derive(Debug, Clone)]
 pub enum OpInner {
-    /// treated as a unary instruction 
+    /// treated as a binary instruction (target, arguments)
     Call {
         id: Id,
         args: InstrInputs,
+    },
+    Alloc {
+        loc: Binding,
+        ty: AllocationType
+    },
+    /// direct assignment of a literal, or just another binding
+    Assign {
+        loc: Binding,
+        val: Val
     },
     Load {
         loc: Binding,
@@ -369,6 +455,10 @@ pub enum OpInner {
     MachInstr {
         ins: MachineInstruction,
     },
+    IrInstr {
+        prop: &'static BasicInstrProp,
+        ops: InstrInputs
+    },
     Jmp {
         target: Target,
     },
@@ -382,9 +472,8 @@ impl Instruction {
     fn basic_props(&self) -> &'static BasicInstrProp {
         // conservative instruction properties
         const TEMPLATE: BasicInstrProp = BasicInstrProp {
-            arg_cnt: ArgCnt::Unknown,
-            arg_classes: None,
-            res_cnt: 0,
+            op_cnt: 0,
+            res_cnt: 1,
             mnemonic: "[[TEMPLATE]]",
             is_branch: false,
             is_terminator: false,
@@ -393,36 +482,38 @@ impl Instruction {
             has_side_effects: true,
             may_read_memory: true,
             may_write_memory: true,
+            operand_relative_type_constraints: &[0],
         };
         match self.inner {
             OpInner::Call { id, args } => &BasicInstrProp { 
-                arg_cnt: ArgCnt::Known(1),
-                res_cnt: 1,
+                op_cnt: 1,
                 mnemonic: "call",
                 is_branch: true,
                 is_terminator: true,
+                operand_relative_type_constraints: &[0, 1],
                 ..TEMPLATE
             },
             OpInner::Load { loc, ptr } => &BasicInstrProp {
-                arg_cnt: ArgCnt::Known(1),
-                res_cnt: 1,
+                op_cnt: 1,
                 mnemonic: "load",
                 has_side_effects: false,
                 may_read_memory: true,
+                operand_relative_type_constraints: &[0, 1],
                 ..TEMPLATE
             },
             OpInner::Block { id, args } => &BasicInstrProp {
-                arg_cnt: ArgCnt::Known(0),
+                op_cnt: 1,
                 res_cnt: 0,
                 mnemonic: "label",
                 is_block_header: true,
                 has_side_effects: false,
                 may_read_memory: false,
                 may_write_memory: false,
+                operand_relative_type_constraints: &[0, 1],
                 ..TEMPLATE
             },
             OpInner::Br { check, success, fail } => &BasicInstrProp {
-                arg_cnt: ArgCnt::Known(3),
+                op_cnt: 3,
                 res_cnt: 0,
                 mnemonic: "br",
                 is_branch: true,
@@ -431,11 +522,12 @@ impl Instruction {
                 has_side_effects: false,
                 may_read_memory: false,
                 may_write_memory: false,
+                operand_relative_type_constraints: &[0, 1, 1],
                 ..TEMPLATE
             },
-            OpInner::MachInstr { ins } => &ins.op.basic,
+            OpInner::MachInstr { ins } => &ins.props.basic,
             OpInner::Jmp { target } => &BasicInstrProp{
-                arg_cnt: ArgCnt::Known(1),
+                op_cnt: 1,
                 res_cnt: 0,
                 mnemonic: "br",
                 is_branch: true,
@@ -447,12 +539,35 @@ impl Instruction {
                 ..TEMPLATE
             },
             OpInner::Store { dst, src } => &BasicInstrProp {
-                arg_cnt: ArgCnt::Known(1),
-                res_cnt: 1,
+                op_cnt: 1,
                 mnemonic: "store",
                 has_side_effects: false,
                 may_read_memory: false,
                 may_write_memory: true,
+                operand_relative_type_constraints: &[0, 1],
+                ..TEMPLATE
+            },
+            OpInner::Assign { loc, val } => &BasicInstrProp {
+                op_cnt: 1,
+                res_cnt: 1,
+                mnemonic: "br",
+                is_commutative: false,
+                has_side_effects: false,
+                may_read_memory: false,
+                may_write_memory: false,
+                operand_relative_type_constraints: &[0, 0],
+                ..TEMPLATE
+            },
+            OpInner::IrInstr { prop, .. } => prop,
+            OpInner::Alloc { loc, ty } => &BasicInstrProp {
+                op_cnt: 1,
+                res_cnt: 1,
+                mnemonic: "br",
+                is_commutative: false,
+                has_side_effects: false,
+                may_read_memory: false,
+                may_write_memory: true,
+                operand_relative_type_constraints: &[0, 1],
                 ..TEMPLATE
             },
         }
@@ -478,22 +593,23 @@ impl Instruction {
         self.basic_props().has_side_effects
     }
 
-    pub fn arg_cnt(&self) -> u8 {
-        let ArgCnt::Known(cnt) = self.basic_props().arg_cnt else {
-            panic!("all instructions should have known arg cnt")
-        };
-        cnt
-    }
-
     pub fn defined_bindings(&self) -> impl Iterator<Item = Binding> + '_ {
         let ret: Box<dyn Iterator<Item = Binding>> = match &self.inner {
             OpInner::Call { id, args } => Box::new([].into_iter()),
             OpInner::Load { loc, ptr } => Box::new([*loc].into_iter()),
             OpInner::Block { id, args } => Box::new([(*id).into()].into_iter().chain(args.iter())),
             OpInner::Br { check, success, fail } => Box::new([].into_iter()),
-            OpInner::MachInstr { ins } => Box::new(ins.set_registers()),
+            OpInner::MachInstr { ins } => Box::new(ins.def_registers()),
             OpInner::Jmp { target } => Box::new([].into_iter()),
             OpInner::Store { dst, src } => Box::new([].into_iter()),
+            OpInner::Assign { loc, .. } => Box::new([*loc].into_iter()),
+            OpInner::IrInstr { prop, ops } => {
+                assert_eq!(prop.op_cnt, 2);
+                assert_eq!(prop.res_cnt, 1);
+                assert_eq!(ops.len(), 3, "incomplete defintion");
+                Box::new(ops.get(0).into_iter())
+            },
+            OpInner::Alloc { loc, ty } =>  Box::new([*loc].into_iter()),
         };
         ret
     }
@@ -508,8 +624,16 @@ impl Instruction {
                     .chain(success.read_registers())
                     .chain(fail.read_registers())),
             OpInner::MachInstr { ins } => Box::new(ins.read_registers()),
-            OpInner::Jmp { target } => Box::new([].into_iter()),
+            OpInner::Jmp { target } => Box::new(target.read_registers()),
             OpInner::Store { dst, src } => Box::new([*dst, *src].into_iter()),
+            OpInner::Assign { val, .. } => Box::new(val.as_binding().into_iter()),
+            OpInner::IrInstr { prop, ops } => {
+                assert_eq!(prop.op_cnt, 2);
+                assert_eq!(prop.res_cnt, 1);
+                assert_eq!(ops.len(), 3, "incomplete defintion");
+                Box::new([ops.get(1), ops.get(2)].into_iter().flatten())
+            },
+            OpInner::Alloc { .. } => Box::new([].into_iter()),
         };
         ret
     }
@@ -530,7 +654,7 @@ impl Instruction {
         (!fst.has_side_effects() || !snd.has_side_effects()) &&
         (!fst.is_block_header() && !snd.is_block_header()) &&
         (!fst.is_term() && !snd.is_term()) && {
-
+            todo!("check usedef chain")
         }
     }
 }
@@ -543,7 +667,7 @@ impl Instruction {
             prev.next.set(next)
         }
         if let Some(ref next) = next {
-            next.prev.set(next)
+            next.prev.set(Some(Rc::downgrade(next)))
         }
         (prev, next)
     }
@@ -606,6 +730,20 @@ impl Instruction {
         ret
     }
 
+    fn has_prev(&self) -> bool {
+        let prev = self.prev.take();
+        let ret = prev.is_some();
+        self.prev.set(prev);
+        ret
+    }
+
+    fn has_next(&self) -> bool {
+        let next = self.next.take();
+        let ret = next.is_some();
+        self.next.set(next);
+        ret
+    }
+
     fn insert_before(self: &Rc<Self>, instr: Rc<Instruction>) {
         debug_assert!(!instr.is_term());
         debug_assert!(instr.is_detached());
@@ -617,7 +755,7 @@ impl Instruction {
             instr.prev.set(Some(Rc::downgrade(&prev)));
         }
         instr.next.set(Some(Rc::clone(self)));
-        self.prev.set(Some(instr));
+        self.prev.set(Some(Rc::downgrade(&instr)));
     }
 
     fn insert_after(self: &Rc<Self>, instr: Rc<Instruction>) {
@@ -628,7 +766,7 @@ impl Instruction {
         let next = self.take_next();
         if let Some(next) = next {
             debug_assert!(!self.is_block_header());
-            next.prev.set(Some(Rc::downcast(&instr)));
+            next.prev.set(Some(Rc::downgrade(&instr)));
             instr.next.set(Some(next));
         }
         instr.prev.set(Some(Rc::downgrade(self)));
@@ -685,7 +823,7 @@ impl BasicBlock {
         let mut it = instrs.into_iter().map(|t| t.into());
         let mut blocks: VecMap<BlockId, BasicBlock> = VecMap::new();
         loop {
-            let Some(head) = it.next() else { break };
+            let Some(head): Option<Instruction> = it.next() else { break };
             let head = Rc::new(head);
             let Some(id) = head.inner.as_block_id() else { return Err(()) };
             let mut curr = Rc::clone(&head);
@@ -699,10 +837,10 @@ impl BasicBlock {
             }
             let repl = blocks.insert(id, BasicBlock {
                 id,
-                pred: Vec::new(),
+                pred: VecSet::new(),
                 head,
                 tail: curr,
-                seq: Vec::new(),
+                seq: VecSet::new(),
             });
             debug_assert!(repl.is_none(), "duplicate definition");
         }
@@ -747,12 +885,12 @@ impl Iterator for BlockInstrIter {
 pub struct Function {
     name: Box<str>,
     blocks: Vec<BasicBlock>,
-    reg_state: BankState,
+    reg_state: SSAState,
 }
 
 impl Function {
-    pub fn from_iter(name: impl Into<Box<str>>, instrs: impl IntoIterator<Item = InstructionTemplate>) -> Self {
-        let blocks = BasicBlock::split_function(instrs);
+    pub fn from_iter(name: impl Into<Box<str>> + ?Sized, instrs: impl IntoIterator<Item = InstructionTemplate>) -> Self {
+        let blocks = BasicBlock::split_function(instrs).expect("valid function");
         Function { name: name.into(), blocks, reg_state: Default::default() }
     }
 

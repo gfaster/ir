@@ -1,7 +1,5 @@
 use crate::Ctx;
 use crate::Binding;
-use crate::Op;
-use crate::OpInner;
 use crate::Reg;
 use crate::VarSet;
 use crate::reg::BlockId;
@@ -565,7 +563,7 @@ impl RegAlloc {
         todo!()
     }
 
-    pub(crate) fn organize_block(block: Vec<Op>, args: &[Binding], ctx: &Ctx) -> Vec<AsmOp> {
+    /*pub(crate) fn organize_block(block: Vec<Op>, args: &[Binding], ctx: &Ctx) -> Vec<AsmOp> {
         let vars = &ctx.vars;
         let mut alloc = Self::new(Reg::count(), Rc::clone(vars));
         let mut last_occurrence: BTreeMap<Binding, usize> = BTreeMap::new();
@@ -659,7 +657,7 @@ impl RegAlloc {
         ret.push_front(AsmOp::BlockBegin(block_id));
         ret.push_back(AsmOp::BlockEnd(block_id));
         ret.into()
-    }
+    }*/
 }
 
 struct FixedPoint {

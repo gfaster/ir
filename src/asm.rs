@@ -2,7 +2,7 @@ use std::fmt::Write;
 use std::{collections::BTreeMap, rc::Rc};
 
 use crate::{Ctx, Binding, BlockId};
-use crate::{reg_alloc::VarLoc, Config, GlobalData, Reg, Routine};
+use crate::{reg_alloc::VarLoc, Config, GlobalData, Reg};
 
 #[derive(Debug, Clone)]
 pub enum OpTarget {

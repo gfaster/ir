@@ -4,7 +4,7 @@ use crate::{IdTy, vec_map::VecMap, Instruction};
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Binding(BindTy);
+pub struct Binding (BindTy);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MachineReg(u16);
@@ -21,7 +21,7 @@ impl Binding {
         self.0.as_machine()
     }
 
-    pub fn as_virtual(&self) -> Option<&IdTy> {
+    pub fn as_virtual(&self) -> Option<&Virtual> {
         self.0.as_virtual()
     }
 
@@ -37,14 +37,14 @@ impl Binding {
         self.0.is_virtual()
     }
 
-    pub const fn from_mach(phys: MachineReg) -> Self {
-        Binding(BindTy::Machine(phys))
-    }
+    // pub const fn from_mach(phys: MachineReg) -> Self {
+    //     Binding { sem_reg: BindTy::Machine(phys) }
+    // }
 
     pub fn new_virtual() -> Self {
         static LABEL_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let id = LABEL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Binding(BindTy::Virtual(id))
+        Binding ( BindTy::Virtual(Virtual(id)))
     }
 
     pub fn new_block() -> Self {
@@ -54,29 +54,47 @@ impl Binding {
 
 impl From<MachineReg> for Binding {
     fn from(v: MachineReg) -> Self {
-        Binding(BindTy::Machine(v))
+        Binding (BindTy::Machine(v))
     }
 }
 
 impl From<BlockId> for Binding {
     fn from(v: BlockId) -> Self {
-        Binding(BindTy::Label(v))
+        Binding ( BindTy::Label(v))
     }
 }
 
 impl From<Virtual> for Binding {
     fn from(v: Virtual) -> Self {
-        Binding(BindTy::Virtual(v))
+        Binding ( BindTy::Virtual(v))
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+impl From<&MachineReg> for Binding {
+    fn from(&v: &MachineReg) -> Self {
+        Binding (BindTy::Machine(v))
+    }
+}
+
+impl From<&BlockId> for Binding {
+    fn from(&v: &BlockId) -> Self {
+        Binding ( BindTy::Label(v))
+    }
+}
+
+impl From<&Virtual> for Binding {
+    fn from(&v: &Virtual) -> Self {
+        Binding ( BindTy::Virtual(v))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum BindTy {
     /// virtual register: infinite 
     Virtual(Virtual),
 
     /// machine register: corresponds with a machine register (e.g. `rax`)
-    Machine(MachineReg),
+    Machine (MachineReg),
 
     Label(BlockId),
 }
@@ -103,6 +121,13 @@ impl std::fmt::Display for BlockId {
     }
 }
 
+impl std::fmt::Display for Virtual {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let v = self.0;
+        write!(f, "%{v}")
+    }
+}
+
 impl BlockId {
     pub fn new() -> BlockId {
         static LABEL_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -112,7 +137,7 @@ impl BlockId {
 
 
 impl BindTy {
-    /// Returns `true` if the bind ty is [`Virtual`].
+    /// Returns `true` if the bind ty is purely [`Virtual`].
     ///
     /// [`Virtual`]: BindTy::Virtual
     #[must_use]
@@ -128,15 +153,7 @@ impl BindTy {
         matches!(self, Self::Machine(..))
     }
 
-    fn as_machine(&self) -> Option<&MachineReg> {
-        if let Self::Machine(v) = self {
-            Some(v)
-        } else {
-            None
-        }
-    }
-
-    fn as_virtual(&self) -> Option<&IdTy> {
+    fn as_virtual(&self) -> Option<&Virtual> {
         if let Self::Virtual(v) = self {
             Some(v)
         } else {
@@ -151,55 +168,97 @@ impl BindTy {
             None
         }
     }
-}
 
-impl std::fmt::Debug for BindTy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        <Self as std::fmt::Display>::fmt(&self, f)
-    }
-}
-
-impl std::fmt::Display for BindTy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BindTy::Virtual(v) => write!(f, "%v_{v}"),
-            BindTy::Machine(m) => write!(f, "%{m}"),
-            BindTy::Label(l) => write!(f, "@{l}"),
+    fn as_machine(&self) -> Option<&MachineReg> {
+        if let Self::Machine(v) = self {
+            Some(v)
+        } else {
+            None
         }
     }
 }
 
 impl std::fmt::Display for Binding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
+        match self.0 {
+            BindTy::Virtual(v) => v.fmt(f),
+            BindTy::Label(l) => l.fmt(f),
+            BindTy::Machine(m) => m.fmt(f),
+        }
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum PhysRegUse {
+    Clobbered,
+    UseClobber,
+    Use,
+    Def,
+    UseDef,
+}
+
+impl PhysRegUse {
+    pub const fn is_read(self) -> bool {
+        matches!(self, Self::Use | Self::UseDef | Self::UseClobber)
+    }
+
+    pub const fn is_clobbered(self) -> bool {
+        matches!(self, Self::Clobbered | Self::UseClobber)
+    }
+
+    pub const fn is_defined(self) -> bool {
+        matches!(self, Self::Def | Self::UseDef)
+    }
+}
+
+#[derive(Debug)]
 enum RegDefineState {
-    DefinedBy(Rc<Instruction>),
+    Defined(Rc<Instruction>),
 
     /// this register is undefined and any use of it is undefined behavior
     Undefined,
 
-    /// This register seems to have multiple defintions (it's probably a machine register)
+    /// This register seems to have multiple defintions. It's probably an error if this appears.
     NonSSA,
-
-    // /// It's unkown whether this register is defined. If this shows up it's probably a bug
-    // Unknown
 }
 
-struct RegState {
+#[derive(Debug)]
+struct SSARegState {
     defined_by: RegDefineState,
     used_by: Vec<Rc<Instruction>>
 }
 
 #[derive(Debug, Default)]
-pub struct BankState {
-    regs: BTreeMap<Binding, RegState>,
+pub struct SSAState {
+    regs: BTreeMap<Binding, SSARegState>,
 }
 
-impl BankState {
+impl SSAState {
     pub fn add_definition(&mut self, instr: &Rc<Instruction>) {
         todo!()
     }
+}
+
+pub struct PtrMeta {
+
+}
+
+pub enum BindMeta {
+}
+
+pub struct MetaBank {
+}
+
+
+pub enum PhysRegDefinednessState {
+    /// Garbage data
+    Clobbered,
+
+    /// holds value of the contained virtual register
+    Virtual(Virtual),
+}
+
+/// physical register state at a certain point in codegen
+pub struct PhysRegState {
+    defined: PhysRegDefinednessState
 }

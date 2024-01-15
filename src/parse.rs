@@ -1,4 +1,4 @@
-use crate::instr::{Target, Function};
+use crate::instr::{Target, Function, InstrInputs, AllocationType};
 use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -698,14 +698,14 @@ impl Parser {
         };
     }
 
-    fn collect_decl_args_idents(idents: &mut BindMap, args: rules::ArgDeclList) -> Vec<Binding> {
+    fn collect_decl_args_idents(idents: &mut BindMap, args: rules::ArgDeclList) -> InstrInputs {
         rules::collect_decl_args(args)
             .into_iter()
             .map(|(_, idt)| idents.assign(idt))
             .collect()
     }
 
-    fn collect_args_idents(idents: &BindMap, args: rules::ArgList) -> Vec<Binding> {
+    fn collect_args_idents(idents: &BindMap, args: rules::ArgList) -> InstrInputs {
         rules::collect_args(args)
             .into_iter()
             .map(|idt| idents.lookup(idt))
@@ -742,7 +742,7 @@ impl Parser {
                         );
                         OpInner::Assign {
                             loc,
-                            val: Val::GlobalLabel(gid),
+                            val: Val::GlobalBinding(gid),
                         }
                     }
                     rules::Source::IntLiteral(int) => OpInner::Assign {
@@ -752,14 +752,12 @@ impl Parser {
                     rules::Source::Binary(ty, lhs, _, rhs) => {
                         let op1 = idents.lookup(lhs);
                         let op2 = idents.lookup(rhs);
-                        let op = instruction_map()[ty.as_ref()];
-                        let mut ins = MachineInstruction::new(op);
-                        ins.push_ops([loc, op1, op2]);
-                        OpInner::Op { ins }
+                        InstructionTemplate::from_binary_op(loc, ty, op1, op2)
+                            .expect("valid ir instruction").inner
                     }
-                    rules::Source::Alloca(_, ty) => OpInner::Assign {
+                    rules::Source::Alloca(_, ty) => OpInner::Alloc {
                         loc,
-                        val: Val::Alloca(ty.into()),
+                        ty: AllocationType::Stack
                     },
                 }
             }
@@ -824,7 +822,7 @@ impl Parser {
             ops.push(self.process_statement(&mut blocks, &mut idents, &mut globals, stmt));
         }
         self.expect::<rules::CloseCurly>();
-        let routine = Function::from_iter( fn_name.as_ref()[1..], ops);
+        let routine = Function::from_iter( &fn_name.as_ref()[1..], ops);
         idents.assert_all_initialized(&globals);
         ParsedFile {
             routine,
