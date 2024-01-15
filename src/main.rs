@@ -21,6 +21,7 @@ use instr::{MachineInstruction, BasicInstrProp, Instruction};
 use reg::{Binding, BlockId, InstrArg};
 mod ir;
 mod vec_map;
+mod stack;
 
 mod parse;
 use asm::{AsmOp, OpTarget};
@@ -49,6 +50,24 @@ impl Type {
         match self {
             Type::I64 => 8,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OperationalValidity {
+    Valid,
+    UndefinedBehavior,
+}
+
+impl OperationalValidity {
+    #[must_use]
+    fn is_valid(&self) -> bool {
+        matches!(self, Self::Valid)
+    }
+
+    #[must_use]
+    fn is_undefined_behavior(&self) -> bool {
+        matches!(self, Self::UndefinedBehavior)
     }
 }
 
