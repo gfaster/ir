@@ -1,4 +1,4 @@
-use crate::{instr::{Target, Function, ArgList, AllocationType, BindList}, reg::{Binding, Immediate}};
+use crate::{instr::{Target, ArgList, AllocationType, BindList}, reg::{Binding, Immediate}, dag::FunctionDag};
 use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -678,7 +678,7 @@ pub(crate) struct Parser {
 }
 
 pub(crate) struct ParsedFile {
-    pub routine: Function,
+    pub routine: FunctionDag,
     pub vars: VarSet,
     pub globals: BTreeMap<Binding, GlobalData>,
 }
@@ -844,10 +844,10 @@ impl Parser {
         while let Some(stmt) = self.maybe::<rules::Statement>() {
             // dbg!(&stmt);
             // dbg!(&self.buf[self.off.get()..]);
-            ops.push(self.process_statement(&mut blocks, &mut idents, &mut globals, stmt));
+            ops.push(self.process_statement(&mut blocks, &mut idents, &mut globals, stmt).into());
         }
         self.expect::<rules::CloseCurly>();
-        let routine = Function::from_iter( &fn_name.as_ref()[1..], ops);
+        let routine = FunctionDag::from_iter( &fn_name.as_ref()[1..], ops).unwrap();
         idents.assert_all_initialized(&globals);
         ParsedFile {
             routine,

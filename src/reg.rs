@@ -421,7 +421,7 @@ pub enum PhysRegDefinednessState {
     Virtual(Virtual),
 }
 
-/// physical register state at a certain point in codegen
+/// physical register state, expected to mutate during codegen
 pub struct PhysRegState {
     defined: PhysRegDefinednessState
 }

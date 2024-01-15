@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::{reg::Virtual, OperationalValidity};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StackSlotState {
     Allocated,
     Freed,
@@ -144,8 +145,9 @@ impl StackState {
                 lslot.state = StackSlotState::merge(&lslot.state, &rslot.state);
             } else {
                 if !lhs.is_never_used(rslot.idx as usize) && !rslot.state.is_freed() {
+                    let idx = lhs.find_never_used_idx() as u32;
                     lhs.slot_map.insert(key, 
-                        StackSlot { idx: lhs.find_never_used_idx() as u32, ..rslot });
+                        StackSlot { idx, ..rslot });
                 }
             }
         }

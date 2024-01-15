@@ -216,34 +216,34 @@ impl AsmOp {
     }
 }
 
-pub(crate) fn make_asm(ctx: &Ctx, functions: &mut [Routine]) -> String {
-    let Ctx {
-        config,
-        vars,
-        globals,
-    } = ctx;
-    let mut s = String::new();
-    writeln!(s, ".intel_syntax noprefix");
-    writeln!(s, ".intel_mnemonic");
-    writeln!(s);
-
-    writeln!(s, ".section .text");
-    writeln!(
-        s,
-        ".file 0 \"{}\"",
-        config.input_files.first().expect("has input file")
-    );
-    writeln!(s);
-    for routine in functions {
-        writeln!(s, "    .globl {}", routine.name).unwrap();
-        write!(s, "{}", routine.to_asm(ctx)).unwrap();
-    }
-
-    writeln!(s);
-    writeln!(s, ".section .rodata");
-    for (_id, global) in globals {
-        write!(s, "{}", global.to_asm()).unwrap();
-    }
-    writeln!(s, ".section \".note.GNU-stack\"");
-    s
-}
+// pub(crate) fn make_asm(ctx: &Ctx, functions: &mut [Routine]) -> String {
+//     let Ctx {
+//         config,
+//         vars,
+//         globals,
+//     } = ctx;
+//     let mut s = String::new();
+//     writeln!(s, ".intel_syntax noprefix");
+//     writeln!(s, ".intel_mnemonic");
+//     writeln!(s);
+//
+//     writeln!(s, ".section .text");
+//     writeln!(
+//         s,
+//         ".file 0 \"{}\"",
+//         config.input_files.first().expect("has input file")
+//     );
+//     writeln!(s);
+//     for routine in functions {
+//         writeln!(s, "    .globl {}", routine.name).unwrap();
+//         write!(s, "{}", routine.to_asm(ctx)).unwrap();
+//     }
+//
+//     writeln!(s);
+//     writeln!(s, ".section .rodata");
+//     for (_id, global) in globals {
+//         write!(s, "{}", global.to_asm()).unwrap();
+//     }
+//     writeln!(s, ".section \".note.GNU-stack\"");
+//     s
+// }

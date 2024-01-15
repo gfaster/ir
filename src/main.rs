@@ -22,6 +22,7 @@ use reg::{Binding, BlockId, InstrArg};
 mod ir;
 mod vec_map;
 mod stack;
+mod dag;
 
 mod parse;
 use asm::{AsmOp, OpTarget};
@@ -627,18 +628,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vars,
         globals,
     } = input.parse();
-    let mut functions = [routine];
+    // let mut functions = [routine];
     let ctx = Ctx {
         config,
         vars,
         globals,
     };
+    for instr in routine.into_instr_vec() {
+        println!("{instr:#?}");
+    }
 
-    let asm = asm::make_asm(&ctx, &mut functions);
+    // let asm = asm::make_asm(&ctx, &mut functions);
 
     let mut f = std::fs::File::create("out.s")?;
     f.set_len(0);
-    write!(f, "{asm}");
+    // write!(f, "{asm}");
 
     let success = std::process::Command::new("as")
         .args(["--fatal-warnings", "-g", "-o", "out.o", "out.s"])

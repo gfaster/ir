@@ -173,8 +173,8 @@ impl ArgList {
         }
     }
 
-    fn iter(&self) -> RvalListIter {
-        RvalListIter { list: self, idx: 0 }
+    fn iter(&self) -> ArgListIter {
+        ArgListIter { list: self, idx: 0 }
     }
 
     fn bindings(&self) -> impl Iterator<Item = Binding> + '_ {
@@ -226,19 +226,19 @@ impl<'a> FromIterator<&'a InstrArg> for ArgList {
 impl<'a> IntoIterator for &'a ArgList {
     type Item = InstrArg;
 
-    type IntoIter = RvalListIter<'a>;
+    type IntoIter = ArgListIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
 }
 
-struct RvalListIter<'a>{
+pub struct ArgListIter<'a>{
     list: &'a ArgList,
     idx: usize,
 }
 
-impl<'a> Iterator for RvalListIter<'a> {
+impl<'a> Iterator for ArgListIter<'a> {
     type Item = InstrArg;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -291,8 +291,8 @@ impl BindList {
         }
     }
 
-    fn iter(&self) -> LvalListIter {
-        LvalListIter { list: self, idx: 0 }
+    fn iter(&self) -> BindListIter {
+        BindListIter { list: self, idx: 0 }
     }
 }
 
@@ -340,19 +340,19 @@ impl<'a> FromIterator<&'a Binding> for BindList {
 impl<'a> IntoIterator for &'a BindList {
     type Item = Binding;
 
-    type IntoIter = LvalListIter<'a>;
+    type IntoIter = BindListIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
 }
 
-struct LvalListIter<'a>{
+pub struct BindListIter<'a>{
     list: &'a BindList,
     idx: usize,
 }
 
-impl<'a> Iterator for LvalListIter<'a> {
+impl<'a> Iterator for BindListIter<'a> {
     type Item = Binding;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -459,6 +459,14 @@ pub struct InstructionTemplate {
     pub inner: OpInner,
 }
 
+impl std::ops::Deref for InstructionTemplate {
+    type Target = OpInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
 impl InstructionTemplate {
     /// for now, all IR instruction are binary operations with one output
     pub fn from_binary_op(res: Binding, op: impl AsRef<str>, lhs: InstrArg, rhs: InstrArg ) -> Option<Self> {
@@ -478,9 +486,7 @@ impl InstructionTemplate {
 impl From<InstructionTemplate> for Instruction {
     fn from(value: InstructionTemplate) -> Self {
         Self {
-            id: InstructionId::new(),
-            next: Cell::new(None),
-            prev: Cell::new(None),
+            // id: InstructionId::new(),
             dbg_info: value.dbg_info,
             inner: value.inner,
         }
@@ -500,20 +506,18 @@ impl InstructionId {
 }
 
 pub struct Instruction {
-    id: InstructionId,
-    next: Cell<Option<Rc<Instruction>>>,
-    prev: Cell<Option<Weak<Instruction>>>,
+    // id: InstructionId,
     dbg_info: Option<DebugInfo>,
     inner: OpInner,
 }
 
-impl std::cmp::PartialEq for Instruction {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-
-impl std::cmp::Eq for Instruction {}
+// impl std::cmp::PartialEq for Instruction {
+//     fn eq(&self, other: &Self) -> bool {
+//         self.id == other.id
+//     }
+// }
+//
+// impl std::cmp::Eq for Instruction {}
 
 impl std::fmt::Debug for Instruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -527,9 +531,7 @@ impl std::fmt::Debug for Instruction {
 impl Clone for Instruction {
     fn clone(&self) -> Self {
         Instruction { 
-            id: InstructionId::new(),
-            next: Cell::new(None), 
-            prev: Cell::new(None), 
+            // id: InstructionId::new(),
             dbg_info: self.dbg_info.clone(), 
             inner: self.inner.clone()
         }
@@ -604,7 +606,7 @@ impl Instruction {
             may_write_memory: true,
             operand_relative_type_constraints: &[0],
         };
-        match self.inner {
+        match &self.inner {
             OpInner::Call { id, args } => &BasicInstrProp { 
                 op_cnt: 1,
                 mnemonic: "call",
@@ -713,6 +715,10 @@ impl Instruction {
         self.basic_props().has_side_effects
     }
 
+    pub fn as_block_header_id(&self) -> Option<BlockId> {
+        self.inner.as_block_id()
+    }
+
     pub fn defined_bindings(&self) -> impl Iterator<Item = Binding> + '_ {
         let ret: Box<dyn Iterator<Item = Binding>> = match &self.inner {
             OpInner::Call { id, args } => Box::new([].into_iter()),
@@ -779,126 +785,6 @@ impl Instruction {
     }
 }
 
-impl Instruction {
-    fn detach(&self) -> (Option<Rc<Self>>, Option<Rc<Self>>) {
-        let prev = self.prev.take().and_then(|ptr| ptr.upgrade());
-        let next = self.next.take();
-        if let Some(ref prev) = prev {
-            prev.next.set(next)
-        }
-        if let Some(ref next) = next {
-            next.prev.set(Some(Rc::downgrade(next)))
-        }
-        (prev, next)
-    }
-
-    fn is_detached(&self) -> bool {
-        self.take_prev().is_none() && self.take_next().is_none()
-    }
-
-    /// returns true if both previous and next instructions are properly linked
-    fn link_is_valid(self: &Rc<Self>) -> bool {
-        if let Some(prev) = self.take_prev() {
-            let Some(prev_next) = prev.take_next() else { return false };
-            if !Rc::ptr_eq(self, &prev_next) {
-                return false;
-            }
-        };
-        if let Some(next) = self.take_next() {
-            let Some(next_prev) = next.take_prev() else { return false };
-            if !Rc::ptr_eq(&self, &next_prev) {
-                return false;
-            }
-        };
-        true
-    }
-
-    fn is_valid_instr(&self) -> bool {
-        let has_prev = self.take_prev().is_some();
-        let has_next = self.take_next().is_some();
-        let is_header = self.is_block_header();
-        let is_term = self.is_term();
-
-        if !has_prev && !is_header {
-            return false;
-        }
-        if has_prev && is_header {
-            return false;
-        }
-        if !has_next && !is_term {
-            return false;
-        }
-        if has_next && is_term {
-            return false;
-        }
-        true
-    }
-
-    fn take_prev(&self) -> Option<Rc<Instruction>> {
-        let ret = self.prev.take().and_then(|p| p.upgrade());
-        if let Some(ref prev) = ret {
-            self.prev.set(Some(Rc::downgrade(prev)))
-        }
-        ret
-    }
-
-    fn take_next(&self) -> Option<Rc<Instruction>> {
-        let ret = self.next.take();
-        if let Some(ref next) = ret {
-            self.next.set(Some(Rc::clone(next)));
-        }
-        ret
-    }
-
-    fn has_prev(&self) -> bool {
-        let prev = self.prev.take();
-        let ret = prev.is_some();
-        self.prev.set(prev);
-        ret
-    }
-
-    fn has_next(&self) -> bool {
-        let next = self.next.take();
-        let ret = next.is_some();
-        self.next.set(next);
-        ret
-    }
-
-    fn insert_before(self: &Rc<Self>, instr: Rc<Instruction>) {
-        debug_assert!(!instr.is_term());
-        debug_assert!(instr.is_detached());
-        debug_assert!(self.link_is_valid());
-        let prev = self.take_prev();
-        if let Some(prev) = prev {
-            debug_assert!(!self.is_block_header());
-            prev.next.set(Some(Rc::clone(&instr)));
-            instr.prev.set(Some(Rc::downgrade(&prev)));
-        }
-        instr.next.set(Some(Rc::clone(self)));
-        self.prev.set(Some(Rc::downgrade(&instr)));
-    }
-
-    fn insert_after(self: &Rc<Self>, instr: Rc<Instruction>) {
-        debug_assert!(!instr.is_term());
-        debug_assert!(!self.is_term());
-        debug_assert!(instr.is_detached());
-        debug_assert!(self.link_is_valid());
-        let next = self.take_next();
-        if let Some(next) = next {
-            debug_assert!(!self.is_block_header());
-            next.prev.set(Some(Rc::downgrade(&instr)));
-            instr.next.set(Some(next));
-        }
-        instr.prev.set(Some(Rc::downgrade(self)));
-        self.next.set(Some(instr));
-    }
-
-    fn append_unfinished(self: &Rc<Self>, instr: Rc<Instruction>) {
-        instr.prev.set(Some(Rc::downgrade(self)));
-        self.next.set(Some(instr));
-    }
-}
-
 impl OpInner {
     fn as_mach_instr(&self) -> Option<&MachineInstruction> {
         if let Self::MachInstr { ins } = self {
@@ -914,107 +800,5 @@ impl OpInner {
         } else {
             None
         }
-    }
-}
-
-pub struct BasicBlock {
-    id: BlockId,
-    pred: VecSet<usize>,
-    head: Rc<Instruction>,
-    tail: Rc<Instruction>,
-    seq: VecSet<usize>,
-}
-
-impl BasicBlock {
-    fn is_valid(&self) -> bool {
-        let mut instr = Some(&self.head);
-        while let Some(i) = instr {
-            if !i.is_valid_instr() || !i.link_is_valid() {
-                return false
-            }
-            if Rc::ptr_eq(i, &self.tail) && !i.is_term() {
-                return false
-            }
-        }
-        true
-    }
-
-    fn split_function(instrs: impl IntoIterator<Item = InstructionTemplate>) -> Result<Vec<BasicBlock>, ()> {
-        let mut it = instrs.into_iter().map(|t| t.into());
-        let mut blocks: VecMap<BlockId, BasicBlock> = VecMap::new();
-        loop {
-            let Some(head): Option<Instruction> = it.next() else { break };
-            let head = Rc::new(head);
-            let Some(id) = head.inner.as_block_id() else { return Err(()) };
-            let mut curr = Rc::clone(&head);
-            while let Some(next) = it.next() {
-                let next = Rc::new(next);
-                curr.append_unfinished(Rc::clone(&next));
-                curr = next;
-                if curr.is_term() {
-                    break;
-                }
-            }
-            let repl = blocks.insert(id, BasicBlock {
-                id,
-                pred: VecSet::new(),
-                head,
-                tail: curr,
-                seq: VecSet::new(),
-            });
-            debug_assert!(repl.is_none(), "duplicate definition");
-        }
-        let ids: Vec<_> = blocks.keys().copied().collect();
-        for id in ids {
-            let seq_ids: Vec<_> = blocks[&id].tail.jump_dsts().map(|x| x.as_label()
-                .expect("Non-label jump targets are not supported")).collect();
-            let mut seq_idxs = Vec::new();
-            let idx = blocks.get_index(&id).unwrap();
-            for seq in &seq_ids {
-                blocks[seq].pred.insert(idx);
-                let Some(seq) = blocks.get_index(seq) else {
-                    panic!("block {seq} was defined in a different function");
-                };
-                seq_idxs.push(seq);
-            }
-            blocks[&id].seq.extend(seq_idxs.iter().copied());
-        }
-
-        Ok(blocks.into_value_vec())
-    }
-
-    fn iter(&self) -> BlockInstrIter {
-        BlockInstrIter { curr: Some(Rc::clone(&self.head)) }
-    }
-}
-
-struct BlockInstrIter {
-    curr: Option<Rc<Instruction>>
-}
-
-impl Iterator for BlockInstrIter {
-    type Item = Rc<Instruction>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let ret = self.curr.take()?;
-        self.curr = ret.take_next();
-        Some(ret)
-    }
-}
-
-pub struct Function {
-    name: Box<str>,
-    blocks: Vec<BasicBlock>,
-    reg_state: SSAState,
-}
-
-impl Function {
-    pub fn from_iter(name: impl Into<Box<str>> + ?Sized, instrs: impl IntoIterator<Item = InstructionTemplate>) -> Self {
-        let blocks = BasicBlock::split_function(instrs).expect("valid function");
-        Function { name: name.into(), blocks, reg_state: Default::default() }
-    }
-
-    fn build_defuse(&mut self) {
-
     }
 }

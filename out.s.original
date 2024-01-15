@@ -1,0 +1,67 @@
+.intel_syntax noprefix
+.intel_mnemonic
+
+.section .text
+.file 0 "input.ll"
+
+    .globl _start
+_start:
+.LFB0:
+    mov rax, 0
+    /*  ^^^ loading literal to %counter.init */
+    jmp .LB_1
+    /* ( free %counter.init ) */
+.LB_1:
+    mov r8, rax
+    /*  ^^^ %counter from "rax" to unused location for backup */
+    mov rax, 1
+    /*  ^^^ loading literal to %syscall.write */
+    mov rdi, 1
+    /*  ^^^ loading literal to %fd */
+    mov rdx, 14
+    /*  ^^^ loading literal to %len */
+    lea rsi, [rip + .L_Data_0]
+    /*  ^^^ loading to %data_ptr */
+    syscall
+    /* ^^^ has arguments ["%syscall.write", "%fd", "%data_ptr", "%len"] */
+    /* "rax" was clobbered */
+    /* ( free %syscall.write ) */
+    /* ( free %fd ) */
+    /* ( free %data_ptr ) */
+    /* ( free %len ) */
+    mov rcx, 5
+    /*  ^^^ loading literal to %counter.max */
+    mov rax, 1
+    /*  ^^^ loading literal to %inc */
+    add r8, rax
+    /*  ^^^ %counter.inc := %counter + %inc */
+    /* ( free %counter ) */
+    /* ( free %inc ) */
+    cmp r8, rcx
+    /*  ^^^ cmp %counter.inc with %counter.max */
+    je .LU_0
+    mov rax, r8
+    /*  ^^^ %counter.inc */
+    jmp .LB_1
+.LU_0:
+    jmp .LB_10
+    /* ( free %counter.inc ) */
+    /* ( free %counter.max ) */
+.LB_10:
+    mov rdi, 0
+    /*  ^^^ loading literal to %ret_val */
+    mov rax, 60
+    /*  ^^^ loading literal to %syscall.exit */
+    syscall
+    /* ^^^ has arguments ["%syscall.exit", "%ret_val"] */
+    /* "rax" was clobbered */
+    /* ( free %syscall.exit ) */
+    /* ( free %ret_val ) */
+.LFE0:
+
+
+.section .rodata
+.L_Data_0:
+.ascii "Hello, World!\n"
+
+.section ".note.GNU-stack"

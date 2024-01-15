@@ -155,7 +155,7 @@ const OP_BIN_RR_F: MachineInstrProp = MachineInstrProp {
     },
     ref_regs: &[(r::Reg::Eflags.to_mach(), PhysRegUse::Def)],
     operand_use: &[PhysRegUse::Use, PhysRegUse::Use],
-    op_eq_constraints: &[0, 1, 1],
+    op_eq_constraints: &[0, 1, 2],
 };
 
 const BIN_RR_FR: MachineInstrProp = MachineInstrProp {
