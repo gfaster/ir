@@ -1,6 +1,6 @@
 use std::{rc::{Rc, Weak}, cell::Cell};
 
-use crate::{reg::{Binding, MachineReg, BlockId, SSAState, PhysRegUse}, Id, vec_map::{VecMap, VecSet}, Val};
+use crate::{reg::{InstrArg, MachineReg, BlockId, SSAState, PhysRegUse, Binding}, Id, vec_map::{VecMap, VecSet}, Val};
 
 /// Properties of a instruction. Note that equality is only checked by pointer, which should be
 /// fine since they should only ever be defined as constants.
@@ -131,14 +131,132 @@ impl std::cmp::PartialEq for BasicInstrProp {
 impl std::cmp::Eq for BasicInstrProp {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InstrInputs {
+pub enum ArgList {
+    None,
+    Unary(InstrArg),
+    Binary(InstrArg, InstrArg),
+    Many(Vec<InstrArg>),
+}
+
+impl ArgList {
+    fn new() -> Self {
+        Self::None
+    }
+    #[must_use]
+    fn len(&self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::Unary(_) => 1,
+            Self::Binary(_, _) => 2,
+            Self::Many(v) => v.len(),
+        }
+    }
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    #[must_use]
+    fn get(&self, idx: usize) -> Option<InstrArg> {
+        match self {
+            Self::None => None,
+            Self::Unary(op1) => [*op1].get(idx).copied(),
+            Self::Binary(op1, op2) => [*op1, *op2].get(idx).copied(),
+            Self::Many(v) => v.get(idx).copied(),
+        }
+    }
+    fn push(&mut self, bind: InstrArg) {
+        match self {
+            Self::None => *self = Self::Unary(bind),
+            Self::Unary(op1) => *self = Self::Binary(*op1, bind),
+            Self::Binary(op1, op2) => *self = Self::Many(vec![*op1, *op2, bind]),
+            Self::Many(v) => v.push(bind),
+        }
+    }
+
+    fn iter(&self) -> RvalListIter {
+        RvalListIter { list: self, idx: 0 }
+    }
+
+    fn bindings(&self) -> impl Iterator<Item = Binding> + '_ {
+        self.iter().filter_map(|a| a.as_binding())
+    }
+}
+
+impl<'a> From<&'a [InstrArg]> for ArgList {
+    fn from(value: &'a [InstrArg]) -> Self {
+        let mut ret = Self::new();
+        for x in value {
+            ret.push(*x);
+        }
+        ret
+    }
+}
+
+impl<const L: usize> From<[InstrArg; L]> for ArgList {
+    fn from(value: [InstrArg; L]) -> Self {
+        match value.len() {
+            0 => Self::None,
+            1 => Self::Unary(value[0]),
+            2 => Self::Binary(value[0], value[1]),
+            _ => Self::Many(Vec::from(value))
+        }
+    }
+}
+
+impl FromIterator<InstrArg> for ArgList {
+    fn from_iter<T: IntoIterator<Item = InstrArg>>(iter: T) -> Self {
+        let mut ret = Self::new();
+        for item in iter {
+            ret.push(item)
+        }
+        ret
+    }
+}
+
+impl<'a> FromIterator<&'a InstrArg> for ArgList {
+    fn from_iter<T: IntoIterator<Item = &'a InstrArg>>(iter: T) -> Self {
+        let mut ret = Self::new();
+        for &item in iter {
+            ret.push(item)
+        }
+        ret
+    }
+}
+
+impl<'a> IntoIterator for &'a ArgList {
+    type Item = InstrArg;
+
+    type IntoIter = RvalListIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+struct RvalListIter<'a>{
+    list: &'a ArgList,
+    idx: usize,
+}
+
+impl<'a> Iterator for RvalListIter<'a> {
+    type Item = InstrArg;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let ret = self.list.get(self.idx)?;
+        self.idx += 1;
+        Some(ret)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindList {
     None,
     Unary(Binding),
     Binary(Binding, Binding),
     Many(Vec<Binding>),
 }
 
-impl InstrInputs {
+impl BindList {
     fn new() -> Self {
         Self::None
     }
@@ -173,12 +291,12 @@ impl InstrInputs {
         }
     }
 
-    fn iter(&self) -> InstrInputsIter {
-        InstrInputsIter { list: self, idx: 0 }
+    fn iter(&self) -> LvalListIter {
+        LvalListIter { list: self, idx: 0 }
     }
 }
 
-impl<'a> From<&'a [Binding]> for InstrInputs {
+impl<'a> From<&'a [Binding]> for BindList {
     fn from(value: &'a [Binding]) -> Self {
         let mut ret = Self::new();
         for x in value {
@@ -188,7 +306,7 @@ impl<'a> From<&'a [Binding]> for InstrInputs {
     }
 }
 
-impl<const L: usize> From<[Binding; L]> for InstrInputs {
+impl<const L: usize> From<[Binding; L]> for BindList {
     fn from(value: [Binding; L]) -> Self {
         match value.len() {
             0 => Self::None,
@@ -199,7 +317,7 @@ impl<const L: usize> From<[Binding; L]> for InstrInputs {
     }
 }
 
-impl FromIterator<Binding> for InstrInputs {
+impl FromIterator<Binding> for BindList {
     fn from_iter<T: IntoIterator<Item = Binding>>(iter: T) -> Self {
         let mut ret = Self::new();
         for item in iter {
@@ -209,7 +327,7 @@ impl FromIterator<Binding> for InstrInputs {
     }
 }
 
-impl<'a> FromIterator<&'a Binding> for InstrInputs {
+impl<'a> FromIterator<&'a Binding> for BindList {
     fn from_iter<T: IntoIterator<Item = &'a Binding>>(iter: T) -> Self {
         let mut ret = Self::new();
         for &item in iter {
@@ -219,22 +337,22 @@ impl<'a> FromIterator<&'a Binding> for InstrInputs {
     }
 }
 
-impl<'a> IntoIterator for &'a InstrInputs {
+impl<'a> IntoIterator for &'a BindList {
     type Item = Binding;
 
-    type IntoIter = InstrInputsIter<'a>;
+    type IntoIter = LvalListIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
 }
 
-struct InstrInputsIter<'a>{
-    list: &'a InstrInputs,
+struct LvalListIter<'a>{
+    list: &'a BindList,
     idx: usize,
 }
 
-impl<'a> Iterator for InstrInputsIter<'a> {
+impl<'a> Iterator for LvalListIter<'a> {
     type Item = Binding;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -253,19 +371,19 @@ pub struct DebugInfo {
 pub struct MachineInstruction {
     /// the type of instruction this is, and all of its static properties
     props: &'static MachineInstrProp,
-    operands: InstrInputs,
+    operands: ArgList,
 }
 
 impl MachineInstruction {
     pub fn new(op: &'static MachineInstrProp) -> Self {
         Self {
             props: op,
-            operands: InstrInputs::new(),
+            operands: ArgList::new(),
         }
     }
 
     fn op_use_iter(&self) -> impl Iterator<Item = (Binding, PhysRegUse)> + '_ {
-        self.operands.iter().zip(self.props.operand_use.iter().copied())
+        self.operands.bindings().zip(self.props.operand_use.iter().copied())
     }
 
     fn implicit_op_use_iter(&self) -> impl Iterator<Item = (Binding, PhysRegUse)> + '_ {
@@ -281,7 +399,7 @@ impl MachineInstruction {
     }
 
     pub fn read_phys_regs(&self) -> impl Iterator<Item = MachineReg> + '_ {
-        self.read_registers().filter_map(|r| r.as_machine().copied())
+        self.read_registers().filter_map(|r| r.as_machine())
     }
 }
 
@@ -314,13 +432,13 @@ impl std::fmt::Display for MachineInstruction {
 
 #[derive(Debug, Clone)]
 pub struct Target {
-    pub id: Binding,
-    pub args: InstrInputs,
+    pub id: BlockId,
+    pub args: ArgList,
 }
 
 impl Target {
     fn read_registers(&self) -> impl Iterator<Item = Binding> + '_ {
-        std::iter::once(self.id).chain(&self.args)
+        std::iter::once(self.id.into()).chain(self.args.bindings())
     }
 }
 
@@ -343,14 +461,15 @@ pub struct InstructionTemplate {
 
 impl InstructionTemplate {
     /// for now, all IR instruction are binary operations with one output
-    pub fn from_binary_op(res: Binding, op: impl AsRef<str>, lhs: Binding, rhs: Binding ) -> Option<Self> {
+    pub fn from_binary_op(res: Binding, op: impl AsRef<str>, lhs: InstrArg, rhs: InstrArg ) -> Option<Self> {
         let &prop = crate::ir::instruction_map().get(op.as_ref())?;
-        let args: InstrInputs = [res, lhs, rhs].into();
+        let args: ArgList = [lhs, rhs].into();
         Some(InstructionTemplate {
             dbg_info: None,
             inner: OpInner::IrInstr { 
                 prop,
-                ops: args
+                res,
+                args,
             }
         })
     }
@@ -428,7 +547,7 @@ pub enum OpInner {
     /// treated as a binary instruction (target, arguments)
     Call {
         id: Id,
-        args: InstrInputs,
+        args: ArgList,
     },
     Alloc {
         loc: Binding,
@@ -441,14 +560,14 @@ pub enum OpInner {
     },
     Load {
         loc: Binding,
-        ptr: Binding,
+        ptr: InstrArg,
     },
     Block {
         id: BlockId,
-        args: InstrInputs,
+        args: BindList,
     },
     Br {
-        check: Binding,
+        check: InstrArg,
         success: Target,
         fail: Target,
     },
@@ -457,14 +576,15 @@ pub enum OpInner {
     },
     IrInstr {
         prop: &'static BasicInstrProp,
-        ops: InstrInputs
+        args: ArgList,
+        res: Binding
     },
     Jmp {
         target: Target,
     },
     Store {
-        dst: Binding,
-        src: Binding,
+        dst: InstrArg,
+        val: InstrArg,
     },
 }
 
@@ -538,7 +658,7 @@ impl Instruction {
                 may_write_memory: false,
                 ..TEMPLATE
             },
-            OpInner::Store { dst, src } => &BasicInstrProp {
+            OpInner::Store { dst, val: src } => &BasicInstrProp {
                 op_cnt: 1,
                 mnemonic: "store",
                 has_side_effects: false,
@@ -601,13 +721,13 @@ impl Instruction {
             OpInner::Br { check, success, fail } => Box::new([].into_iter()),
             OpInner::MachInstr { ins } => Box::new(ins.def_registers()),
             OpInner::Jmp { target } => Box::new([].into_iter()),
-            OpInner::Store { dst, src } => Box::new([].into_iter()),
+            OpInner::Store { dst, val: src } => Box::new([].into_iter()),
             OpInner::Assign { loc, .. } => Box::new([*loc].into_iter()),
-            OpInner::IrInstr { prop, ops } => {
+            OpInner::IrInstr { prop, res, args } => {
                 assert_eq!(prop.op_cnt, 2);
                 assert_eq!(prop.res_cnt, 1);
-                assert_eq!(ops.len(), 3, "incomplete defintion");
-                Box::new(ops.get(0).into_iter())
+                assert_eq!(args.len(), 2, "incomplete defintion");
+                Box::new([*res].into_iter())
             },
             OpInner::Alloc { loc, ty } =>  Box::new([*loc].into_iter()),
         };
@@ -616,22 +736,22 @@ impl Instruction {
 
     pub fn read_bindings(&self) -> impl Iterator<Item = Binding> + '_ {
         let ret: Box<dyn Iterator<Item = Binding>> = match &self.inner {
-            OpInner::Call { id, args } => Box::new(args.into_iter()),
-            OpInner::Load { loc, ptr } => Box::new([*ptr].into_iter()),
+            OpInner::Call { id, args } => Box::new(args.bindings()),
+            OpInner::Load { loc, ptr } => Box::new(ptr.as_binding().into_iter()),
             OpInner::Block { id, args } => Box::new([].into_iter()),
             OpInner::Br { check, success, fail } => 
-                Box::new([*check].into_iter()
+                Box::new(check.as_binding().into_iter()
                     .chain(success.read_registers())
                     .chain(fail.read_registers())),
             OpInner::MachInstr { ins } => Box::new(ins.read_registers()),
             OpInner::Jmp { target } => Box::new(target.read_registers()),
-            OpInner::Store { dst, src } => Box::new([*dst, *src].into_iter()),
+            OpInner::Store { dst, val: src } => Box::new([*dst, *src].into_iter().filter_map(|a| a.as_binding())),
             OpInner::Assign { val, .. } => Box::new(val.as_binding().into_iter()),
-            OpInner::IrInstr { prop, ops } => {
+            OpInner::IrInstr { prop, args: ops, res } => {
                 assert_eq!(prop.op_cnt, 2);
                 assert_eq!(prop.res_cnt, 1);
                 assert_eq!(ops.len(), 3, "incomplete defintion");
-                Box::new([ops.get(1), ops.get(2)].into_iter().flatten())
+                Box::new([ops.get(1), ops.get(2)].into_iter().flatten().filter_map(|a| a.as_binding()))
             },
             OpInner::Alloc { .. } => Box::new([].into_iter()),
         };
@@ -640,8 +760,8 @@ impl Instruction {
 
     pub fn jump_dsts(&self) -> impl Iterator<Item = Binding> + '_ {
         let ret: Box<dyn Iterator<Item = Binding>> = match &self.inner {
-            OpInner::Jmp { target } => Box::new([target.id].into_iter()),
-            OpInner::Br { success, fail, ..  } => Box::new([success.id, fail.id].into_iter()),
+            OpInner::Jmp { target } => Box::new([target.id].into_iter().map(Into::into)),
+            OpInner::Br { success, fail, ..  } => Box::new([success.id, fail.id].into_iter().map(Into::into)),
             _ => Box::new([].into_iter())
         };
         ret
@@ -850,7 +970,7 @@ impl BasicBlock {
                 .expect("Non-label jump targets are not supported")).collect();
             let mut seq_idxs = Vec::new();
             let idx = blocks.get_index(&id).unwrap();
-            for &seq in &seq_ids {
+            for seq in &seq_ids {
                 blocks[seq].pred.insert(idx);
                 let Some(seq) = blocks.get_index(seq) else {
                     panic!("block {seq} was defined in a different function");

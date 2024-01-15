@@ -18,7 +18,7 @@ mod arch;
 mod instr;
 mod reg;
 use instr::{MachineInstruction, BasicInstrProp, Instruction};
-use reg::{Binding, BlockId};
+use reg::{Binding, BlockId, InstrArg};
 mod ir;
 mod vec_map;
 
@@ -61,16 +61,14 @@ struct Ctx {
 #[derive(Debug, Clone, Copy)]
 enum Val {
     GlobalBinding(Binding),
-    Binding(Binding),
-    Literal(u64),
+    Binding(InstrArg),
 }
 
 impl Val {
     pub fn as_binding(&self) -> Option<Binding> {
         match self {
             Val::GlobalBinding(b) => Some(*b),
-            Val::Binding(b) => Some(*b),
-            Val::Literal(_) => None,
+            Val::Binding(b) => b.as_binding(),
         }
     }
 }
