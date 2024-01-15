@@ -21,7 +21,7 @@ pub fn instruction_map() -> &'static HashMap<&'static str, &'static BasicInstrPr
         let mut map = HashMap::with_capacity(IR_INSTRUCTIONS.len());
         for i in IR_INSTRUCTIONS {
             let res = map.insert(i.mnemonic, i);
-            assert!(res.is_some(), "mnemonic {} was defined twice", i.mnemonic);
+            assert!(res.is_none(), "mnemonic {} was defined twice", i.mnemonic);
         }
         MAP = Some(map);
         MAP.as_ref().unwrap()

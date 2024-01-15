@@ -1,4 +1,4 @@
-use std::{rc::{Rc, Weak}, cell::Cell};
+use std::{rc::{Rc, Weak}, cell::Cell, fmt::Debug};
 
 use crate::{reg::{InstrArg, MachineReg, BlockId, SSAState, PhysRegUse, Binding}, Id, vec_map::{VecMap, VecSet}, Val};
 
@@ -130,7 +130,7 @@ impl std::cmp::PartialEq for BasicInstrProp {
 }
 impl std::cmp::Eq for BasicInstrProp {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ArgList {
     None,
     Unary(InstrArg),
@@ -179,6 +179,12 @@ impl ArgList {
 
     fn bindings(&self) -> impl Iterator<Item = Binding> + '_ {
         self.iter().filter_map(|a| a.as_binding())
+    }
+}
+
+impl Debug for ArgList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
     }
 }
 
@@ -248,7 +254,7 @@ impl<'a> Iterator for ArgListIter<'a> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum BindList {
     None,
     Unary(Binding),
@@ -293,6 +299,12 @@ impl BindList {
 
     fn iter(&self) -> BindListIter {
         BindListIter { list: self, idx: 0 }
+    }
+}
+
+impl Debug for BindList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
     }
 }
 
@@ -588,6 +600,9 @@ pub enum OpInner {
         dst: InstrArg,
         val: InstrArg,
     },
+    Return {
+        val: InstrArg
+    }
 }
 
 impl Instruction {
@@ -610,8 +625,8 @@ impl Instruction {
             OpInner::Call { id, args } => &BasicInstrProp { 
                 op_cnt: 1,
                 mnemonic: "call",
-                is_branch: true,
-                is_terminator: true,
+                is_branch: false, // TODO: stop lying
+                is_terminator: false, // TODO: stop lying
                 operand_relative_type_constraints: &[0, 1],
                 ..TEMPLATE
             },
@@ -692,6 +707,19 @@ impl Instruction {
                 operand_relative_type_constraints: &[0, 1],
                 ..TEMPLATE
             },
+            OpInner::Return { val } => &BasicInstrProp {
+                op_cnt: 1,
+                res_cnt: 0,
+                mnemonic: "ret",
+                is_branch: false,
+                is_terminator: true,
+                is_block_header: false,
+                has_side_effects: true,
+                may_read_memory: false,
+                may_write_memory: false,
+                operand_relative_type_constraints: &[0],
+                ..TEMPLATE
+            },
         }
     }
 
@@ -736,6 +764,7 @@ impl Instruction {
                 Box::new([*res].into_iter())
             },
             OpInner::Alloc { loc, ty } =>  Box::new([*loc].into_iter()),
+            OpInner::Return { val } => Box::new([].into_iter()),
         };
         ret
     }
@@ -753,13 +782,14 @@ impl Instruction {
             OpInner::Jmp { target } => Box::new(target.read_registers()),
             OpInner::Store { dst, val: src } => Box::new([*dst, *src].into_iter().filter_map(|a| a.as_binding())),
             OpInner::Assign { val, .. } => Box::new(val.as_binding().into_iter()),
-            OpInner::IrInstr { prop, args: ops, res } => {
+            OpInner::IrInstr { prop, args, res } => {
                 assert_eq!(prop.op_cnt, 2);
                 assert_eq!(prop.res_cnt, 1);
-                assert_eq!(ops.len(), 3, "incomplete defintion");
-                Box::new([ops.get(1), ops.get(2)].into_iter().flatten().filter_map(|a| a.as_binding()))
+                assert_eq!(args.len(), 2, "incomplete defintion");
+                Box::new([args.get(1), args.get(2)].into_iter().flatten().filter_map(|a| a.as_binding()))
             },
             OpInner::Alloc { .. } => Box::new([].into_iter()),
+            OpInner::Return { val } => Box::new(val.as_binding().into_iter()),
         };
         ret
     }

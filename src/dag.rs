@@ -95,6 +95,10 @@ impl DagNode {
     fn immediate_predecessors(&self) -> impl Iterator<Item = Rc<DagNode>> {
         self.pred.iter().chain(self.parents.iter())
     }
+
+    fn immediate_successors(&self) -> impl Iterator<Item = Rc<DagNode>> {
+        self.succ.iter().chain(self.children.iter())
+    }
 }
 
 impl PartialOrd for DagNode {
@@ -128,7 +132,7 @@ impl InstructionDag {
     fn single_from_iter(instrs: &mut impl Iterator<Item = Instruction>) -> Result<Self, ()> {
         let root = instrs.next().ok_or(())?;
         if !root.is_block_header() {
-            eprintln!("block didn't start with header");
+            eprintln!("block didn't start with header, is: {root:#?}");
             return Err(())
         }
         let block_id = root.as_block_header_id().expect("is a header");
@@ -161,9 +165,9 @@ impl InstructionDag {
             for used in next.instr.read_bindings() {
                 if let Some(definer) = definitions.get(&used) {
                     definer.children.insert(Rc::clone(&next));
-                    next.parents.insert(Rc::clone(&next));
+                    next.parents.insert(Rc::clone(&definer));
                 } else {
-
+                    undefined.insert(used);
                 }
             }
 
@@ -217,22 +221,31 @@ impl InstructionDag {
         let mut ret = Vec::new();
         let mut emitted: BTreeSet<Rc<DagNode>> = BTreeSet::new();
         let mut queue = VecDeque::new();
+        let mut queue_contents: BTreeSet<Rc<DagNode>> = BTreeSet::new();
         queue.push_back(Rc::clone(&self.root));
         while let Some(node) = queue.pop_front() {
+            eprintln!("Looking at node: {:?}", node.id);
             if emitted.contains(&node) {
                 continue
             }
             let mut rem_node = Some(Rc::clone(&node));
             for pred in node.immediate_predecessors() {
+                eprintln!("looking at pred {:?} for node {:?}", pred.id,  node.id);
                 if !emitted.contains(&pred) {
                     if let Some(rem) = rem_node.take() {
+                        eprintln!("putting node {:?} back on the queue", node.id);
                         queue.push_front(rem)
                     }
-                    queue.push_front(pred);
+                    if queue_contents.insert(Rc::clone(&pred)) {
+                        eprintln!("putting predecessor {:?} for node {:?} on the queue", pred.id, node.id);
+                        queue.push_front(pred);
+                    }
                 }
             }
             let Some(node) = rem_node else {continue};
+            queue.extend(node.immediate_successors());
             ret.push(node.instr.clone());
+            eprintln!("emitting node {:?}", node.id);
             emitted.insert(node);
         }
 

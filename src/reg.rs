@@ -1,4 +1,4 @@
-use std::{rc::Rc, collections::BTreeMap};
+use std::{rc::Rc, collections::BTreeMap, fmt::Display};
 
 use crate::{IdTy, vec_map::VecMap, Instruction};
 
@@ -6,7 +6,7 @@ use crate::{IdTy, vec_map::VecMap, Instruction};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct InstrArg (ArgTy);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Binding (BindTy);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -201,6 +201,16 @@ impl From<&Virtual> for Binding {
 impl From<&BlockId> for Binding {
     fn from(&v: &BlockId) -> Self {
         Binding ( BindTy::Block(v))
+    }
+}
+
+impl std::fmt::Debug for Binding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            BindTy::Virtual(v) => Display::fmt(&v, f),
+            BindTy::Machine(m) => Display::fmt(&m, f),
+            BindTy::Block(b) => Display::fmt(&b, f),
+        }
     }
 }
 

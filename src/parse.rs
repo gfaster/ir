@@ -483,6 +483,7 @@ mod rules {
         Call("call");
         Alloca("alloca");
         Store("store");
+        Ret("ret");
     }
 
     impl_rules_struct! {
@@ -501,6 +502,7 @@ mod rules {
         struct Branch<'a> (Br<'a>, Arg<'a>, Comma<'a>, BranchTarget<'a>, Comma<'a>, BranchTarget<'a>);
         struct CallStmt<'a> (Call<'a>, FnIdent<'a>, ArgList<'a>);
         struct StoreStmt<'a> (Store<'a>, TypeQual<'a>, Arg<'a>, Comma<'a>, Ptr<'a>, Register<'a>);
+        struct RetStmt<'a> (Ret<'a>, Arg<'a>);
         // struct GlobalStmt<'a> (Global<'a>, Equals<'a>, Literal<'a>);
     }
 
@@ -526,6 +528,7 @@ mod rules {
             Branch(Branch<'a>),
             Call(CallStmt<'a>),
             Store(StoreStmt<'a>),
+            Ret(RetStmt<'a>),
         }
     }
 
@@ -823,6 +826,9 @@ impl Parser {
             rules::Statement::Store(rules::StoreStmt(_, ty, src, _, _, dst)) => OpInner::Store {
                 val: self.process_arg(src, globals, idents),
                 dst: idents.lookup(dst).into(),
+            },
+            rules::Statement::Ret(rules::RetStmt(_, ret)) => OpInner::Return {
+                val: self.process_arg(ret, globals, idents)
             },
         };
         InstructionTemplate {
