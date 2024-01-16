@@ -188,6 +188,19 @@ impl Debug for ArgList {
     }
 }
 
+impl std::fmt::Display for ArgList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut it = self.iter().peekable();
+        while let Some(next) = it.next() {
+            write!(f, "{next}")?;
+            if it.peek().is_some() {
+                write!(f, ", ")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl<'a> From<&'a [InstrArg]> for ArgList {
     fn from(value: &'a [InstrArg]) -> Self {
         let mut ret = Self::new();
@@ -307,6 +320,20 @@ impl Debug for BindList {
         f.debug_list().entries(self.iter()).finish()
     }
 }
+
+impl std::fmt::Display for BindList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut it = self.iter().peekable();
+        while let Some(next) = it.next() {
+            write!(f, "{next}")?;
+            if it.peek().is_some() {
+                write!(f, ", ")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 
 impl<'a> From<&'a [Binding]> for BindList {
     fn from(value: &'a [Binding]) -> Self {
@@ -451,6 +478,13 @@ pub struct Target {
 impl Target {
     fn read_registers(&self) -> impl Iterator<Item = Binding> + '_ {
         std::iter::once(self.id.into()).chain(self.args.bindings())
+    }
+}
+
+impl std::fmt::Display for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { id, args } = self;
+        write!(f, "label {id} ({args})")
     }
 }
 
@@ -829,6 +863,24 @@ impl OpInner {
             Some(*id)
         } else {
             None
+        }
+    }
+}
+
+impl std::fmt::Display for Instruction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.inner {
+            OpInner::Call { id, args } => write!(f, "call @{id} ({args})"),
+            OpInner::Alloc { loc, ty } => write!(f, "{loc} = alloca"),
+            OpInner::Assign { loc, val } => write!(f, "{loc} = {val}"),
+            OpInner::Load { loc, ptr } => write!(f, "{loc} = load ptr {ptr}"),
+            OpInner::Block { id, args } => write!(f, "label {id} ({args}):"),
+            OpInner::Br { check, success, fail } => write!(f, "br {check}, {success}, {fail}"),
+            OpInner::MachInstr { ins } => write!(f, "{ins}"),
+            OpInner::IrInstr { prop, args, res } => write!(f, "{res} = {prop} {args}", prop = prop.mnemonic),
+            OpInner::Jmp { target } => write!(f, "br {target}"),
+            OpInner::Store { dst, val } => write!(f, "store {dst}, {val}"),
+            OpInner::Return { val } => write!(f, "ret {val}"),
         }
     }
 }

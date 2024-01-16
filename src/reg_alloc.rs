@@ -481,7 +481,8 @@ impl RegAlloc {
 
     /// get the var held in reg
     pub fn reg_var(&self, reg: u8) -> Option<&Binding> {
-        self.regs[reg as usize].map(|id| self.vars_full.get(&id).expect("register has valid LocId"))
+        // self.regs[reg as usize].map(|id| self.vars_full.get(&id).expect("register has valid LocId"))
+        self.regs[reg as usize].as_ref()
     }
 
     /// get the first reg that holds var

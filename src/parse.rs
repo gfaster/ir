@@ -3,7 +3,7 @@ use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet, HashMap},
     ops::Range,
-    rc::Rc,
+    rc::Rc, sync::Arc,
 };
 
 use crate::{unique_label, GlobalData, InstrArg, Val, VarSet, IdTy, BlockId, instr::{MachineInstruction, InstructionTemplate, OpInner}, ir::instruction_map};
@@ -91,10 +91,10 @@ impl<T, G: Generator<Item = T>> IdentMap<T, G> {
             }
         }
     }
-    fn invert(self) -> BTreeSet<T> where
+    fn invert(self) -> BTreeMap<T, Arc<str>> where
     T: Ord + Eq
     {
-        self.map.into_iter().map(|(_k, (v, _init))| v).collect()
+        self.map.into_iter().map(|(k, (v, _init))| (v, (*k).into())).collect()
     }
 }
 type BindMap = IdentMap<Binding, fn() -> Binding>;

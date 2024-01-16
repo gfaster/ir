@@ -1,4 +1,4 @@
-use std::{rc::Rc, collections::BTreeMap, fmt::Display};
+use std::{rc::Rc, collections::BTreeMap, fmt::Display, sync::Mutex};
 
 use crate::{IdTy, vec_map::VecMap, Instruction};
 
@@ -20,6 +20,55 @@ pub struct Immediate(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BlockId(IdTy);
+
+pub mod bind_names {
+    use super::{Binding, BindTy};
+    use std::{sync::{Mutex, RwLock, Arc}, collections::BTreeMap, fmt::Display};
+
+    static BIND_NAMES: RwLock<BTreeMap<Binding, Arc<str>>> = RwLock::new(BTreeMap::new());
+    pub fn register_binding(bind: Binding, name: impl Into<Arc<str>>) {
+        BIND_NAMES.write().unwrap().insert(bind, name.into());
+    }
+
+    pub fn register_many<I, T>(bank: I)
+    where 
+        I: IntoIterator<Item = (Binding, T)>,
+        T: Into<Arc<str>>
+    {
+        BIND_NAMES.write().unwrap().extend(bank.into_iter().map(|(k, v)| (k, v.into())))
+    }
+
+    pub struct BindDisplay(BindDispInner);
+    enum BindDispInner {
+        Named(Arc<str>),
+        Unknown(Binding)
+    }
+
+    impl Display for BindDisplay {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match &self.0 {
+                BindDispInner::Named(s) => s.fmt(f),
+                BindDispInner::Unknown(Binding(BindTy::Virtual(v))) => {
+                    write!(f, "%{}", v.0)
+                },
+                BindDispInner::Unknown(Binding(BindTy::Machine(m))) => {
+                    m.fmt(f)
+                },
+                BindDispInner::Unknown(Binding(BindTy::Block(b))) => {
+                    write!(f, "{}", b.0)
+                },
+            }
+        }
+    }
+
+    pub fn bind_name(bind: Binding) -> impl Display {
+        if let Some(name) = BIND_NAMES.read().unwrap().get(&bind) {
+            BindDisplay(BindDispInner::Named(Arc::clone(name)))
+        } else {
+            BindDisplay(BindDispInner::Unknown(bind))
+        }
+    }
+}
 
 
 impl InstrArg {
@@ -317,14 +366,17 @@ impl std::fmt::Display for MachineReg {
 
 impl std::fmt::Display for BlockId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "@{}", self.0)
+        let b: Binding = self.into();
+        let name = bind_names::bind_name(b);
+        write!(f, "{name}")
     }
 }
 
 impl std::fmt::Display for Virtual {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let v = self.0;
-        write!(f, "%{v}")
+        let b: Binding = self.into();
+        let name = bind_names::bind_name(b);
+        write!(f, "{name}")
     }
 }
 

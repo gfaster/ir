@@ -224,20 +224,20 @@ impl InstructionDag {
         let mut queue_contents: BTreeSet<Rc<DagNode>> = BTreeSet::new();
         queue.push_back(Rc::clone(&self.root));
         while let Some(node) = queue.pop_front() {
-            eprintln!("Looking at node: {:?}", node.id);
+            // eprintln!("Looking at node: {:?}", node.id);
             if emitted.contains(&node) {
                 continue
             }
             let mut rem_node = Some(Rc::clone(&node));
             for pred in node.immediate_predecessors() {
-                eprintln!("looking at pred {:?} for node {:?}", pred.id,  node.id);
+                // eprintln!("looking at pred {:?} for node {:?}", pred.id,  node.id);
                 if !emitted.contains(&pred) {
                     if let Some(rem) = rem_node.take() {
-                        eprintln!("putting node {:?} back on the queue", node.id);
+                        // eprintln!("putting node {:?} back on the queue", node.id);
                         queue.push_front(rem)
                     }
                     if queue_contents.insert(Rc::clone(&pred)) {
-                        eprintln!("putting predecessor {:?} for node {:?} on the queue", pred.id, node.id);
+                        // eprintln!("putting predecessor {:?} for node {:?} on the queue", pred.id, node.id);
                         queue.push_front(pred);
                     }
                 }
@@ -245,7 +245,7 @@ impl InstructionDag {
             let Some(node) = rem_node else {continue};
             queue.extend(node.immediate_successors());
             ret.push(node.instr.clone());
-            eprintln!("emitting node {:?}", node.id);
+            // eprintln!("emitting node {:?}", node.id);
             emitted.insert(node);
         }
 

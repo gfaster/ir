@@ -7,6 +7,7 @@ use std::fmt::Write as FmtWrite;
 use std::io::Write;
 use std::ops::Deref;
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
 
 // mod reorder;
 // use reorder::*;
@@ -36,7 +37,7 @@ use crate::cli::Input;
 /// symbol id currently global scope and unique
 type Id = usize;
 
-type VarSet = Rc<BTreeSet<Binding>>;
+type VarSet = Rc<BTreeMap<Binding, Arc<str>>>;
 
 type IdTy = usize;
 
@@ -89,6 +90,15 @@ impl Val {
         match self {
             Val::GlobalBinding(b) => Some(*b),
             Val::Binding(b) => b.as_binding(),
+        }
+    }
+}
+
+impl std::fmt::Display for Val {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Val::GlobalBinding(g) => write!(f, "global {g}"),
+            Val::Binding(b) => write!(f, "{b}"),
         }
     }
 }
@@ -628,6 +638,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vars,
         globals,
     } = input.parse();
+    reg::bind_names::register_many((*vars).clone());
     // let mut functions = [routine];
     let ctx = Ctx {
         config,
@@ -635,7 +646,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         globals,
     };
     for instr in routine.into_instr_vec() {
-        println!("{instr:#?}");
+        println!("{instr}");
     }
 
     // let asm = asm::make_asm(&ctx, &mut functions);
