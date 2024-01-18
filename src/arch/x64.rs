@@ -117,6 +117,7 @@ const BASIC_TEMPLATE: BasicInstrProp = BasicInstrProp {
     may_read_memory: true,
     may_write_memory: true,
     operand_relative_type_constraints: &[],
+    simulation: None,
 };
 
 const BASIC_TEMPLATE_SIMPLE: BasicInstrProp = BasicInstrProp {
@@ -131,6 +132,7 @@ const BASIC_TEMPLATE_SIMPLE: BasicInstrProp = BasicInstrProp {
     may_read_memory: false,
     may_write_memory: false,
     operand_relative_type_constraints: &[],
+    simulation: None,
 };
 
 const OP_BIN_RR_R: MachineInstrProp = MachineInstrProp {

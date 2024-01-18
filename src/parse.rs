@@ -1,4 +1,4 @@
-use crate::{instr::{Target, ArgList, AllocationType, BindList}, reg::{Binding, Immediate}, dag::FunctionDag};
+use crate::{instr::{Target, ArgList, AllocationType, BindList}, reg::{Binding, Immediate}, dag::FunctionDag, attr::BindAttributes, ty::Type};
 use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -512,10 +512,10 @@ mod rules {
             IntLiteral(IntLiteral<'a>),
         }
         enum Source<'a> {
-            Binary(Op<'a>, Arg<'a>, Comma<'a>, Arg<'a>),
+            Binary(Op<'a>, TypeQual<'a>, Arg<'a>, Comma<'a>, Arg<'a>),
             Alloca(Alloca<'a>, TypeQual<'a>),
-            Load(Load<'a>, TypeQual<'a>, Ptr<'a>, Register<'a>),
-            Arg(Arg<'a>),
+            Load(Load<'a>, TypeQual<'a>, Comma<'a>, Ptr<'a>, Register<'a>),
+            Literal(TypeQual<'a>, Literal<'a>),
         }
         enum Arg<'a> {
             Reg(Register<'a>),
@@ -538,7 +538,12 @@ mod rules {
         fn from(value: TypeQual<'_>) -> Self {
             let s = value.as_ref();
             match s {
-                "i64" => Type::I64,
+                "ptr" => Type::ptr(),
+                "i64" => Type::i64(),
+                "i32" => Type::i32(),
+                "i16" => Type::i16(),
+                "i8" => Type::i8(),
+                "i1" => Type::i1(),
                 _ => panic!("invalid type {s:?}"),
             }
         }
@@ -574,9 +579,9 @@ mod rules {
         let Some(ArgDeclNode(reg, mut rem)) = list else {
             return out;
         };
-        out.push((Type::I64, reg.1));
+        out.push((reg.0.into(), reg.1));
         while let Some(ArgDeclNodeRem(_, nrem)) = rem {
-            out.push((Type::I64, nrem.0 .1));
+            out.push((nrem.0.0.into(), nrem.0.1));
             rem = nrem.1;
         }
         out
@@ -769,29 +774,32 @@ impl Parser {
             rules::Statement::Assign(rules::AssignStatement(dst, _, src)) => {
                 let loc = idents.assign(dst).try_into().expect("invalid lvalue");
                 match src {
-                    rules::Source::Load(_, _, _, reg) => OpInner::Load {
+                    rules::Source::Load(_, ty, _, _, reg) =>                         OpInner::Load {
                         loc,
                         ptr: idents.lookup_or_declare(reg).into(),
-                    },
-                    rules::Source::Arg(a) => OpInner::Assign { 
-                        loc,
-                        val: Val::Binding(self.process_arg(a, globals, idents))
-                    },
-                    rules::Source::Binary(ty, lhs, _, rhs) => {
+                        attr: BindAttributes::new(ty.into()),
+                    }
+                        ,
+                    rules::Source::Binary(op, ty, lhs, _, rhs) => {
                         let op1 = self.process_arg(lhs, globals, idents);
                         let op2 = self.process_arg(rhs, globals, idents);
-                        InstructionTemplate::from_binary_op(loc, ty, op1, op2)
+                        InstructionTemplate::from_binary_op(loc, op, ty.into(), op1, op2)
                             .expect("valid ir instruction").inner
                     }
-                    rules::Source::Alloca(_, ty) => OpInner::Alloc {
+                    rules::Source::Alloca(_, ty) =>                         OpInner::Alloc {
                         loc,
-                        ty: AllocationType::Stack
-                    },
+                        ty: AllocationType::Stack,
+                        attr: BindAttributes::new(ty.into()),
+                    }
+                        ,
+                    rules::Source::Literal(_, _) => todo!(),
                 }
             }
-            rules::Statement::Label(rules::LabelDef(_, idt, args)) => OpInner::Block {
-                id: blocks.assign(idt),
-                args: Self::collect_decl_args_idents(idents, args),
+            rules::Statement::Label(rules::LabelDef(_, idt, args)) => {
+                OpInner::Block {
+                            id: blocks.assign(idt),
+                            args: Self::collect_decl_args_idents(idents, args),
+                        }
             },
             rules::Statement::Jmp(rules::JmpStmt(_, rules::BranchTarget(_, l, args))) => {
                 OpInner::Jmp {

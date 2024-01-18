@@ -8,8 +8,8 @@ define i64 @_start () {
 	%len = 14
 	%data_ptr = "Hello, World!\n"
 	call @syscall (%syscall.write, %fd, %data_ptr, %len)
-	%counter.max = 5
-	%counter = load i64 ptr %counter.ptr
+	%counter.max = i64 5
+	%counter = load i64, ptr %counter.ptr
 	%counter.inc = add %counter, 1
 	store i64 %counter.inc, ptr %counter.ptr
 	%cont = eq %counter.inc, %counter.max

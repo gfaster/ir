@@ -1,6 +1,6 @@
 use std::{rc::Rc, collections::BTreeMap, fmt::Display, sync::Mutex};
 
-use crate::{IdTy, vec_map::VecMap, Instruction};
+use crate::{IdTy, vec_map::VecMap, Instruction, ty::Type};
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

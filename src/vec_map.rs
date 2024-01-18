@@ -154,7 +154,7 @@ impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for VecMap<K, V> {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone)]
 pub struct VecSet<K>(Vec<K>);
 
 impl<K: Eq> Extend<K> for VecSet<K> {
@@ -206,6 +206,12 @@ impl<K> VecSet<K> {
 
     pub fn iter(&self) -> impl Iterator<Item = &K> {
         self.0.iter()
+    }
+}
+
+impl<K> Default for VecSet<K> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -58,7 +58,8 @@ const BASE_OP: BasicInstrProp = BasicInstrProp {
     has_side_effects: true,
     may_read_memory: true,
     may_write_memory: true,
-    operand_relative_type_constraints: &[0, 0, 0]
+    operand_relative_type_constraints: &[0, 0, 0],
+    simulation: None
 };
 
 new_template!{SIMPLE_OP < BASE_OP = {
@@ -67,14 +68,14 @@ new_template!{SIMPLE_OP < BASE_OP = {
     may_write_memory: false
 }}
 
-new_op!{pub ADD < SIMPLE_OP = {mnemonic: "add", is_commutative: true}}
-new_op!{pub MUL < SIMPLE_OP = {mnemonic: "mul", is_commutative: true}}
-new_op!{pub SHR < SIMPLE_OP = {mnemonic: "shr", is_commutative: false}}
+new_op!{pub ADD < SIMPLE_OP = {mnemonic: "add", is_commutative: true, simulation: Some(|l, r| Some(l+r))}}
+new_op!{pub MUL < SIMPLE_OP = {mnemonic: "mul", is_commutative: true, simulation: Some(|l, r| Some(l*r))}}
+new_op!{pub SHR < SIMPLE_OP = {mnemonic: "shr", is_commutative: false, simulation: Some(|l, r| Some(l>>r))}}
 new_op!{pub SAR < SIMPLE_OP = {mnemonic: "sar", is_commutative: false}}
-new_op!{pub SHL < SIMPLE_OP = {mnemonic: "shl", is_commutative: false}}
-new_op!{pub AND < SIMPLE_OP = {mnemonic: "and", is_commutative: true}}
-new_op!{pub OR  < SIMPLE_OP = {mnemonic: "or",  is_commutative: true}}
-new_op!{pub XOR < SIMPLE_OP = {mnemonic: "xor", is_commutative: true}}
+new_op!{pub SHL < SIMPLE_OP = {mnemonic: "shl", is_commutative: false, simulation: Some(|l, r| Some(l<<r))}}
+new_op!{pub AND < SIMPLE_OP = {mnemonic: "and", is_commutative: true, simulation: Some(|l, r| Some(l&r))}}
+new_op!{pub OR  < SIMPLE_OP = {mnemonic: "or",  is_commutative: true, simulation: Some(|l, r| Some(l|r))}}
+new_op!{pub XOR < SIMPLE_OP = {mnemonic: "xor", is_commutative: true, simulation: Some(|l, r| Some(l^r))}}
 
 new_template!{CMP_OP < SIMPLE_OP = {
     operand_relative_type_constraints: &[0, 1, 1]

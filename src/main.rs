@@ -24,6 +24,11 @@ mod ir;
 mod vec_map;
 mod stack;
 mod dag;
+mod sig;
+mod ty;
+use ty::Type;
+mod attr;
+mod edag;
 
 mod parse;
 use asm::{AsmOp, OpTarget};
@@ -42,18 +47,6 @@ type VarSet = Rc<BTreeMap<Binding, Arc<str>>>;
 type IdTy = usize;
 
 
-#[derive(Debug, Clone, Copy)]
-enum Type {
-    I64,
-}
-
-impl Type {
-    fn size(&self) -> usize {
-        match self {
-            Type::I64 => 8,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy)]
 enum OperationalValidity {

@@ -1,6 +1,6 @@
 use std::{rc::{Rc, Weak}, cell::Cell, fmt::Debug};
 
-use crate::{reg::{InstrArg, MachineReg, BlockId, SSAState, PhysRegUse, Binding}, Id, vec_map::{VecMap, VecSet}, Val};
+use crate::{reg::{InstrArg, MachineReg, BlockId, SSAState, PhysRegUse, Binding}, Id, vec_map::{VecMap, VecSet}, Val, attr::BindAttributes, ty::Type};
 
 /// Properties of a instruction. Note that equality is only checked by pointer, which should be
 /// fine since they should only ever be defined as constants.
@@ -121,6 +121,9 @@ pub struct BasicInstrProp {
     ///
     /// Also note that this only enforces matching types, and won't ensure two types are different
     pub operand_relative_type_constraints: &'static [u8],
+
+    /// simulation of the instruction. Should be none if there are side effects.
+    pub simulation: Option<fn(u64, u64) -> Option<u64>>
 }
 
 impl std::cmp::PartialEq for BasicInstrProp {
@@ -515,12 +518,13 @@ impl std::ops::Deref for InstructionTemplate {
 
 impl InstructionTemplate {
     /// for now, all IR instruction are binary operations with one output
-    pub fn from_binary_op(res: Binding, op: impl AsRef<str>, lhs: InstrArg, rhs: InstrArg ) -> Option<Self> {
+    pub fn from_binary_op(res: Binding, op: impl AsRef<str>, ty: Type, lhs: InstrArg, rhs: InstrArg ) -> Option<Self> {
         let &prop = crate::ir::instruction_map().get(op.as_ref())?;
         let args: ArgList = [lhs, rhs].into();
         Some(InstructionTemplate {
             dbg_info: None,
             inner: OpInner::IrInstr { 
+                attr: BindAttributes::new(ty),
                 prop,
                 res,
                 args,
@@ -553,6 +557,7 @@ impl InstructionId {
 
 pub struct Instruction {
     // id: InstructionId,
+    /// attributes of defined binding
     dbg_info: Option<DebugInfo>,
     inner: OpInner,
 }
@@ -598,6 +603,7 @@ pub enum OpInner {
         args: ArgList,
     },
     Alloc {
+        attr: BindAttributes,
         loc: Binding,
         ty: AllocationType
     },
@@ -607,6 +613,7 @@ pub enum OpInner {
         val: Val
     },
     Load {
+        attr: BindAttributes,
         loc: Binding,
         ptr: InstrArg,
     },
@@ -620,9 +627,11 @@ pub enum OpInner {
         fail: Target,
     },
     MachInstr {
+        attr: BindAttributes,
         ins: MachineInstruction,
     },
     IrInstr {
+        attr: BindAttributes,
         prop: &'static BasicInstrProp,
         args: ArgList,
         res: Binding
@@ -654,9 +663,10 @@ impl Instruction {
             may_read_memory: true,
             may_write_memory: true,
             operand_relative_type_constraints: &[0],
+            simulation: None,
         };
         match &self.inner {
-            OpInner::Call { id, args } => &BasicInstrProp { 
+            OpInner::Call { .. } => &BasicInstrProp { 
                 op_cnt: 1,
                 mnemonic: "call",
                 is_branch: false, // TODO: stop lying
@@ -664,7 +674,7 @@ impl Instruction {
                 operand_relative_type_constraints: &[0, 1],
                 ..TEMPLATE
             },
-            OpInner::Load { loc, ptr } => &BasicInstrProp {
+            OpInner::Load { .. } => &BasicInstrProp {
                 op_cnt: 1,
                 mnemonic: "load",
                 has_side_effects: false,
@@ -672,7 +682,7 @@ impl Instruction {
                 operand_relative_type_constraints: &[0, 1],
                 ..TEMPLATE
             },
-            OpInner::Block { id, args } => &BasicInstrProp {
+            OpInner::Block { .. } => &BasicInstrProp {
                 op_cnt: 1,
                 res_cnt: 0,
                 mnemonic: "label",
@@ -683,7 +693,7 @@ impl Instruction {
                 operand_relative_type_constraints: &[0, 1],
                 ..TEMPLATE
             },
-            OpInner::Br { check, success, fail } => &BasicInstrProp {
+            OpInner::Br { .. } => &BasicInstrProp {
                 op_cnt: 3,
                 res_cnt: 0,
                 mnemonic: "br",
@@ -696,8 +706,8 @@ impl Instruction {
                 operand_relative_type_constraints: &[0, 1, 1],
                 ..TEMPLATE
             },
-            OpInner::MachInstr { ins } => &ins.props.basic,
-            OpInner::Jmp { target } => &BasicInstrProp{
+            OpInner::MachInstr { ins, .. } => &ins.props.basic,
+            OpInner::Jmp { .. } => &BasicInstrProp{
                 op_cnt: 1,
                 res_cnt: 0,
                 mnemonic: "br",
@@ -709,7 +719,7 @@ impl Instruction {
                 may_write_memory: false,
                 ..TEMPLATE
             },
-            OpInner::Store { dst, val: src } => &BasicInstrProp {
+            OpInner::Store { .. } => &BasicInstrProp {
                 op_cnt: 1,
                 mnemonic: "store",
                 has_side_effects: false,
@@ -718,7 +728,7 @@ impl Instruction {
                 operand_relative_type_constraints: &[0, 1],
                 ..TEMPLATE
             },
-            OpInner::Assign { loc, val } => &BasicInstrProp {
+            OpInner::Assign { .. } => &BasicInstrProp {
                 op_cnt: 1,
                 res_cnt: 1,
                 mnemonic: "br",
@@ -730,7 +740,7 @@ impl Instruction {
                 ..TEMPLATE
             },
             OpInner::IrInstr { prop, .. } => prop,
-            OpInner::Alloc { loc, ty } => &BasicInstrProp {
+            OpInner::Alloc { .. } => &BasicInstrProp {
                 op_cnt: 1,
                 res_cnt: 1,
                 mnemonic: "br",
@@ -741,7 +751,7 @@ impl Instruction {
                 operand_relative_type_constraints: &[0, 1],
                 ..TEMPLATE
             },
-            OpInner::Return { val } => &BasicInstrProp {
+            OpInner::Return { .. } => &BasicInstrProp {
                 op_cnt: 1,
                 res_cnt: 0,
                 mnemonic: "ret",
@@ -784,20 +794,20 @@ impl Instruction {
     pub fn defined_bindings(&self) -> impl Iterator<Item = Binding> + '_ {
         let ret: Box<dyn Iterator<Item = Binding>> = match &self.inner {
             OpInner::Call { id, args } => Box::new([].into_iter()),
-            OpInner::Load { loc, ptr } => Box::new([*loc].into_iter()),
+            OpInner::Load { loc, .. } => Box::new([*loc].into_iter()),
             OpInner::Block { id, args } => Box::new([(*id).into()].into_iter().chain(args.iter())),
             OpInner::Br { check, success, fail } => Box::new([].into_iter()),
-            OpInner::MachInstr { ins } => Box::new(ins.def_registers()),
+            OpInner::MachInstr { ins, .. } => Box::new(ins.def_registers()),
             OpInner::Jmp { target } => Box::new([].into_iter()),
             OpInner::Store { dst, val: src } => Box::new([].into_iter()),
             OpInner::Assign { loc, .. } => Box::new([*loc].into_iter()),
-            OpInner::IrInstr { prop, res, args } => {
+            OpInner::IrInstr { prop, res, args, .. } => {
                 assert_eq!(prop.op_cnt, 2);
                 assert_eq!(prop.res_cnt, 1);
                 assert_eq!(args.len(), 2, "incomplete defintion");
                 Box::new([*res].into_iter())
             },
-            OpInner::Alloc { loc, ty } =>  Box::new([*loc].into_iter()),
+            OpInner::Alloc { loc, .. } =>  Box::new([*loc].into_iter()),
             OpInner::Return { val } => Box::new([].into_iter()),
         };
         ret
@@ -805,18 +815,18 @@ impl Instruction {
 
     pub fn read_bindings(&self) -> impl Iterator<Item = Binding> + '_ {
         let ret: Box<dyn Iterator<Item = Binding>> = match &self.inner {
-            OpInner::Call { id, args } => Box::new(args.bindings()),
-            OpInner::Load { loc, ptr } => Box::new(ptr.as_binding().into_iter()),
+            OpInner::Call { args, .. } => Box::new(args.bindings()),
+            OpInner::Load { ptr, .. } => Box::new(ptr.as_binding().into_iter()),
             OpInner::Block { id, args } => Box::new([].into_iter()),
             OpInner::Br { check, success, fail } => 
                 Box::new(check.as_binding().into_iter()
                     .chain(success.read_registers())
                     .chain(fail.read_registers())),
-            OpInner::MachInstr { ins } => Box::new(ins.read_registers()),
+            OpInner::MachInstr { ins, .. } => Box::new(ins.read_registers()),
             OpInner::Jmp { target } => Box::new(target.read_registers()),
             OpInner::Store { dst, val: src } => Box::new([*dst, *src].into_iter().filter_map(|a| a.as_binding())),
             OpInner::Assign { val, .. } => Box::new(val.as_binding().into_iter()),
-            OpInner::IrInstr { prop, args, res } => {
+            OpInner::IrInstr { prop, args, res, .. } => {
                 assert_eq!(prop.op_cnt, 2);
                 assert_eq!(prop.res_cnt, 1);
                 assert_eq!(args.len(), 2, "incomplete defintion");
@@ -851,7 +861,7 @@ impl Instruction {
 
 impl OpInner {
     fn as_mach_instr(&self) -> Option<&MachineInstruction> {
-        if let Self::MachInstr { ins } = self {
+        if let Self::MachInstr { ins, .. } = self {
             Some(ins)
         } else {
             None
@@ -871,13 +881,13 @@ impl std::fmt::Display for Instruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.inner {
             OpInner::Call { id, args } => write!(f, "call @{id} ({args})"),
-            OpInner::Alloc { loc, ty } => write!(f, "{loc} = alloca"),
+            OpInner::Alloc { loc, ty, attr } => write!(f, "{loc} = alloca"),
             OpInner::Assign { loc, val } => write!(f, "{loc} = {val}"),
-            OpInner::Load { loc, ptr } => write!(f, "{loc} = load ptr {ptr}"),
+            OpInner::Load { loc, ptr, attr } => write!(f, "{loc} = load ptr {ptr}"),
             OpInner::Block { id, args } => write!(f, "label {id} ({args}):"),
             OpInner::Br { check, success, fail } => write!(f, "br {check}, {success}, {fail}"),
-            OpInner::MachInstr { ins } => write!(f, "{ins}"),
-            OpInner::IrInstr { prop, args, res } => write!(f, "{res} = {prop} {args}", prop = prop.mnemonic),
+            OpInner::MachInstr { ins, attr } => write!(f, "{ins}"),
+            OpInner::IrInstr { prop, args, res, attr } => write!(f, "{res} = {prop} {args}", prop = prop.mnemonic),
             OpInner::Jmp { target } => write!(f, "br {target}"),
             OpInner::Store { dst, val } => write!(f, "store {dst}, {val}"),
             OpInner::Return { val } => write!(f, "ret {val}"),
