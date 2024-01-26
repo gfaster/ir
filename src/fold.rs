@@ -18,3 +18,11 @@
 //! to
 //! %2 = 10
 //! ```
+
+use crate::instr::Instruction;
+
+pub trait RuleFold {
+    fn try_fold(&self, instr: &Instruction, used_ops: &[bool]) -> Option<Instruction>;
+}
+
+

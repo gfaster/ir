@@ -555,38 +555,12 @@ impl InstructionId {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Instruction {
     // id: InstructionId,
     /// attributes of defined binding
     dbg_info: Option<DebugInfo>,
     inner: OpInner,
-}
-
-// impl std::cmp::PartialEq for Instruction {
-//     fn eq(&self, other: &Self) -> bool {
-//         self.id == other.id
-//     }
-// }
-//
-// impl std::cmp::Eq for Instruction {}
-
-impl std::fmt::Debug for Instruction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct(std::any::type_name::<Self>())
-            .field("dbg_info", &self.dbg_info)
-            .field("inner", &self.inner)
-            .finish()
-    }
-}
-
-impl Clone for Instruction {
-    fn clone(&self) -> Self {
-        Instruction { 
-            // id: InstructionId::new(),
-            dbg_info: self.dbg_info.clone(), 
-            inner: self.inner.clone()
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

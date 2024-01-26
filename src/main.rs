@@ -23,12 +23,15 @@ use reg::{Binding, BlockId, InstrArg};
 mod ir;
 mod vec_map;
 mod stack;
-mod dag;
+// mod dag;
 mod sig;
 mod ty;
 use ty::Type;
 mod attr;
 mod edag;
+mod fold;
+mod appendvec;
+mod list;
 
 mod parse;
 use asm::{AsmOp, OpTarget};
@@ -638,9 +641,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vars,
         globals,
     };
-    for instr in routine.into_instr_vec() {
-        println!("{instr}");
-    }
+    // for instr in routine.into_instr_vec() {
+    //     println!("{instr}");
+    // }
 
     // let asm = asm::make_asm(&ctx, &mut functions);
 

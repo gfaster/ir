@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::OnceLock};
 
 use crate::instr::*;
 
@@ -12,20 +12,15 @@ const IR_INSTRUCTIONS: [&'static BasicInstrProp; 5] = [
 ];
 
 pub fn instruction_map() -> &'static HashMap<&'static str, &'static BasicInstrProp> {
-    static mut MAP: Option<HashMap<&'static str, &'static BasicInstrProp>> = None;
-    // SAFETY: only one thread for now
-    unsafe {
-        if let Some(m) = &MAP {
-            return m;
-        }
+    static MAP: OnceLock<HashMap<&'static str, &'static BasicInstrProp>> = OnceLock::new();
+    MAP.get_or_init(|| {
         let mut map = HashMap::with_capacity(IR_INSTRUCTIONS.len());
         for i in IR_INSTRUCTIONS {
             let res = map.insert(i.mnemonic, i);
             assert!(res.is_none(), "mnemonic {} was defined twice", i.mnemonic);
         }
-        MAP = Some(map);
-        MAP.as_ref().unwrap()
-    }
+        map
+    })
 }
 
 macro_rules! new_op {

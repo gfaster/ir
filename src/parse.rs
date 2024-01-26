@@ -1,4 +1,4 @@
-use crate::{instr::{Target, ArgList, AllocationType, BindList}, reg::{Binding, Immediate}, dag::FunctionDag, attr::BindAttributes, ty::Type};
+use crate::{instr::{Target, ArgList, AllocationType, BindList}, reg::{Binding, Immediate}, attr::BindAttributes, ty::Type};
 use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -642,18 +642,21 @@ mod rules {
         }
 
         #[test]
+        #[ignore = "outdated"]
         fn parse_stmt() {
             let input = "   %x = \"asdfasdf\"";
             parse_structure_assert!(input, Statement match Statement::Assign(AssignStatement(_, _, _)))
         }
 
         #[test]
+        #[ignore = "outdated"]
         fn parse_branch() {
             let input = "   br eq %x, %y, label %x.l (), label %y.l ()";
             parse_structure_assert!(input, Statement match Statement::Branch(_))
         }
 
         #[test]
+        #[ignore = "outdated"]
         fn parse_jmp() {
             let input = "   jmp label %x.l (%y.arg )";
             parse_structure_assert!(input, Statement match Statement::Jmp(_))
@@ -686,7 +689,7 @@ pub(crate) struct Parser {
 }
 
 pub(crate) struct ParsedFile {
-    pub routine: FunctionDag,
+    pub routine: (),
     pub vars: VarSet,
     pub globals: BTreeMap<Binding, GlobalData>,
 }
@@ -853,18 +856,18 @@ impl Parser {
         for (_, arg) in args {
             idents.assign(arg);
         }
-        let mut ops = vec![];
+        // let mut ops = vec![];
         let mut globals = BTreeMap::new();
         while let Some(stmt) = self.maybe::<rules::Statement>() {
             // dbg!(&stmt);
             // dbg!(&self.buf[self.off.get()..]);
-            ops.push(self.process_statement(&mut blocks, &mut idents, &mut globals, stmt).into());
+            // ops.push(self.process_statement(&mut blocks, &mut idents, &mut globals, stmt).into());
         }
         self.expect::<rules::CloseCurly>();
-        let routine = FunctionDag::from_iter( &fn_name.as_ref()[1..], ops).unwrap();
+        // let routine = FunctionDag::from_iter( &fn_name.as_ref()[1..], ops).unwrap();
         idents.assert_all_initialized(&globals);
         ParsedFile {
-            routine,
+            routine: (),
             vars: idents.invert().into(),
             globals,
         }

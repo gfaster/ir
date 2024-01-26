@@ -2,194 +2,7 @@
 
 use std::{num::NonZeroUsize, cell::{RefCell, UnsafeCell, Cell}, sync::atomic::AtomicPtr, mem::{MaybeUninit, ManuallyDrop}, ptr, borrow::BorrowMut, collections::VecDeque};
 
-use crate::vec_map::VecSet;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Idx(NonZeroUsize);
-
-impl Idx {
-    fn new(val: usize) -> Self {
-        Self(NonZeroUsize::new(val + 1).expect("val nonzero"))
-    }
-
-    fn idx(&self) -> usize {
-        self.0.get()
-    }
-}
-impl From<Idx> for usize {
-    fn from(value: Idx) -> Self {
-        value.idx()
-    }
-}
-impl From<&Idx> for usize {
-    fn from(&value: &Idx) -> Self {
-        value.into()
-    }
-}
-impl<T> std::ops::Index<Idx> for Vec<T> {
-    type Output = T;
-
-    fn index(&self, index: Idx) -> &Self::Output {
-        &self[index.idx()]
-    }
-}
-impl<T> std::ops::Index<&Idx> for Vec<T> {
-    type Output = T;
-
-    fn index(&self, &index: &Idx) -> &Self::Output {
-        &self[index.idx()]
-    }
-}
-
-struct AppendVecInner<T> {
-    // prev: *const AppendVecInner<T>,
-    next: UnsafeCell<Option<Box<AppendVecInner<T>>>>,
-    start: usize,
-    cnt: Cell<usize>,
-    vals: [UnsafeCell<MaybeUninit<T>>; 50]
-}
-
-impl<T> AppendVecInner<T> {
-    // fn new(start: usize, prev: Option<&Self>) -> Box<Self> {
-    fn new(start: usize) -> Box<Self> {
-        Box::new( Self {
-            // prev: prev.map_or(ptr::null(), |p| p as *const Self),
-            next: UnsafeCell::new(None),
-            start,
-            cnt: 0.into(),
-            vals: std::array::from_fn(|_| UnsafeCell::new(MaybeUninit::uninit())),
-        })
-    }
-}
-
-impl<T> Drop for AppendVecInner<T> {
-    fn drop(&mut self) {
-        unsafe {
-            for i in 0..self.cnt.get() {
-                self.vals[i].get_mut().assume_init_drop()
-            }
-        }
-    }
-}
-
-struct AppendVec<T> {
-    inner: Box<AppendVecInner<T>>,
-    len: Cell<usize>
-}
-
-impl<T> AppendVec<T> {
-    fn new() -> Self {
-        AppendVec { inner: AppendVecInner::new(0), len: 0.into() }
-    }
-
-    fn len(&self) -> usize {
-        self.len.get()
-    }
-
-    unsafe fn get_idx(&self, mut idx: usize) -> (&AppendVecInner<T>, usize) {
-        let mut seg = &self.inner;
-        while idx >= seg.vals.len() {
-            idx -= seg.vals.len();
-            unsafe {
-                if let Some(next) = &*seg.next.get() {
-                    seg = next
-                } else {
-                    let start = seg.start + seg.vals.len();
-                    seg.next.get().write(Some(AppendVecInner::new(start)));
-                    seg = &(*seg.next.get()).as_ref().unwrap_unchecked()
-                }
-            }
-        }
-        (seg, idx)
-    }
-
-    fn append(&self, val: T) -> usize {
-        let ret = self.len.take();
-        self.len.set(ret + 1);
-        unsafe {
-            let (inner, idx) = self.get_idx(ret);
-            assert_eq!(idx, inner.cnt.get());
-            inner.cnt.set(idx + 1);
-            (*inner.vals[idx].get()).write(val);
-        }
-        ret
-    }
-
-    fn get(&self, idx: usize) -> Option<&T> {
-        if idx >= self.len.get() {
-            return None;
-        }
-        unsafe {
-            let (inner, idx) = self.get_idx(idx);
-            Some((*inner.vals[idx].get()).assume_init_ref())
-        }
-    }
-
-    fn iter(&self) -> AppendVecIter<T> {
-        AppendVecIter {
-            ptr: &self.inner,
-            idx: 0,
-        }
-    }
-
-    fn iter_mut(&mut self) -> AppendVecIterMut<T> {
-        AppendVecIterMut {
-            ptr: &mut self.inner,
-            idx: 0,
-        }
-    }
-
-}
-
-impl<T, I> std::ops::Index<I> for AppendVec<T>
-    where I: Into<usize>
-{
-    type Output = T;
-
-    fn index(&self, index: I) -> &Self::Output {
-        self.get(index.into()).expect("valid index")
-    }
-}
-
-struct AppendVecIter<'a, T> {
-    ptr: &'a AppendVecInner<T>,
-    idx: usize,
-}
-
-impl<'a, T> Iterator for AppendVecIter<'a, T> {
-    type Item = &'a T;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        unsafe {
-            if self.idx >= self.ptr.cnt.get() {
-                let next_inner = (&*self.ptr.next.get()).as_ref()?;
-                self.ptr = next_inner;
-                self.idx = 0;
-            }
-            Some((*self.ptr.vals[self.idx].get()).assume_init_ref())
-        }
-    }
-}
-
-struct AppendVecIterMut<'a, T> {
-    ptr: &'a mut AppendVecInner<T>,
-    idx: usize,
-}
-
-impl<'a, T> Iterator for AppendVecIterMut<'a, T> {
-    type Item = &'a mut T;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        unsafe {
-            if self.idx >= self.ptr.cnt.get() {
-                let next_inner = (&mut *self.ptr.next.get()).as_mut()?;
-                self.ptr = next_inner;
-                self.idx = 0;
-            }
-            Some((*self.ptr.vals[self.idx].get()).assume_init_mut())
-        }
-    }
-}
+use crate::{vec_map::VecSet, appendvec::{Idx, AppendVec}};
 
 /// append only connected DAG that is modifiable through shared references.
 /// 
@@ -251,6 +64,10 @@ impl<'a, T> DagRef<'a, T> {
             dag: self.dag,
             idx,
         }
+    }
+
+    fn to_idx(self) -> DagIdx {
+        DagIdx(self.idx)
     }
 
     pub fn children(self) -> impl Iterator<Item = Self> {
@@ -352,6 +169,10 @@ impl<T> Dag<T> {
         }
     }
 
+    pub fn get_root(&self) -> DagRef<T> {
+        DagRef { dag: self, idx: self.root.get() }
+    }
+
     /// push an item onto the DAG. Note that if the node is not connected to the rest of the DAG,
     /// then it will not be emitted when made into a topological sort 
     pub fn push(&self, item: T) -> DagRef<T> {
@@ -385,6 +206,14 @@ impl<T> Dag<T> {
 
     fn get_ref(&self, idx: Idx) -> DagRef<T> {
         DagRef { dag: self, idx }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DagIdx(Idx);
+impl DagIdx {
+    fn to_ref<T>(self, dag: &Dag<T>) -> DagRef<T> {
+        DagRef { dag, idx: self.0 }
     }
 }
 
