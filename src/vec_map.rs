@@ -174,6 +174,14 @@ impl<K> VecSet<K> {
         self.0.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn pop(&mut self) -> Option<K> {
+        self.0.pop()
+    }
+
     pub fn insert(&mut self, key: K) -> bool
     where K: Eq
     {

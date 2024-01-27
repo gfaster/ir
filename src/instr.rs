@@ -1,6 +1,7 @@
+use crate::regstate::PhysRegUse;
 use std::{rc::{Rc, Weak}, cell::Cell, fmt::Debug};
 
-use crate::{reg::{InstrArg, MachineReg, BlockId, SSAState, PhysRegUse, Binding}, Id, vec_map::{VecMap, VecSet}, Val, attr::BindAttributes, ty::Type};
+use crate::{reg::{InstrArg, MachineReg, BlockId, Binding}, Id, vec_map::{VecMap, VecSet}, Val, attr::BindAttributes, ty::Type};
 
 /// Properties of a instruction. Note that equality is only checked by pointer, which should be
 /// fine since they should only ever be defined as constants.

@@ -32,6 +32,7 @@ mod edag;
 mod fold;
 mod appendvec;
 mod list;
+mod regstate;
 
 mod parse;
 use asm::{AsmOp, OpTarget};

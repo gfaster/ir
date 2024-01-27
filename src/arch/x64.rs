@@ -1,5 +1,5 @@
 #![allow(non_camel_case_types)]
-use crate::{instr::{MachineInstrProp, BasicInstrProp, ArgCnt}, reg::PhysRegUse};
+use crate::{instr::{MachineInstrProp, BasicInstrProp, ArgCnt}, regstate::PhysRegUse};
 
 pub mod r {
     use crate::reg::MachineReg;

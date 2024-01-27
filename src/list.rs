@@ -9,7 +9,12 @@ pub struct List<T> {
     data: AppendVec<Node<T>>,
 }
 
-pub struct Node<T> {
+/// Linked List Node
+///
+/// head and tail sentinels have their next or prev ptr respectively pointing to the start of the
+/// struct. This lets iterators spin on the tail node. Detached nodes have their prev ptr set to
+/// None and the next ptr set to a forward node. 
+struct Node<T> {
     item: MaybeUninit<T>,
     next: Cell<ListPtr<T>>,
     prev: Cell<ListPtr<T>>,
@@ -24,37 +29,68 @@ impl<T> Node<T> {
         self.prev.get() == Some(NonNull::from(self))
     }
 
-    fn next(&self) -> Option<&Self> {
-        unsafe {
-            let node = &*self.next.get()?.as_ptr();
-            if node.is_sentinel() {
-                None
-            } else {
-                Some(node)
+    fn is_detached(&self) -> bool {
+        debug_assert!(self.next.get().is_some());
+        self.prev.get().is_none()
+    }
+
+    /// get the next forwarded node if `self` is detached
+    fn get_forwarding(&self) -> &Self {
+        let mut node = self;
+        while node.is_detached() {
+            unsafe {
+                node = node.next.get().expect("next ptr should never be None").as_ref();
             }
+        }
+        node
+    }
+
+    /// get the next value, even if it's a sentinel.
+    fn next_any(&self) -> &Self {
+        let node = self.get_forwarding();
+        unsafe {
+            &*node.next.get().expect("next ptr should never be None").as_ptr()
+        }
+    }
+
+    fn next(&self) -> Option<&Self> {
+        let node = self.next_any();
+        if node.is_sentinel() {
+            None
+        } else {
+            Some(node)
+        }
+    }
+
+    /// get the next value, even if it's a sentinel
+    fn prev_any(&self) -> &Self {
+        let node = self.get_forwarding();
+        unsafe {
+            node.prev.get().expect("non-detached node should have prev ptr").as_ref()
         }
     }
 
     fn prev(&self) -> Option<&Self> {
-        unsafe {
-            let node = &*self.prev.get()?.as_ptr();
-            if node.is_sentinel() {
-                None
-            } else {
-                Some(node)
-            }
+        let node = self.prev_any();
+        if node.is_sentinel() {
+            None
+        } else {
+            Some(node)
         }
     }
 
-    /// detaches a node from the list, returns the prev and next nodes
-    fn detach(&self) -> (*const Node<T>, *const Node<T>) {
+    /// detaches a node from the list, sets the `next` ptr to point to the predecessor
+    fn detach(&self) {
         assert!(!self.is_sentinel(), "sentinel nodes cannot be detached from the list");
         unsafe {
-            let prev = self.prev.take().expect("node should not be a sentinel");
-            let next = self.next.take().expect("node should not be a sentinel");
+            let Some(prev) = self.prev.take() else {
+                // if prev is None, then this node has been detached
+                return
+            };
+            let next = self.next.get().expect("next should never be None");
             (*prev.as_ptr()).next.set(Some(next));
             (*next.as_ptr()).prev.set(Some(prev));
-            (prev.as_ptr(), next.as_ptr())
+            self.next.set(Some(prev));
         }
     }
 }
@@ -100,25 +136,27 @@ impl<T> List<T> {
         &self.data[1]
     }
 
+    /// insert an item after the given node
+    ///
+    /// Safety: node must be in the same list
     unsafe fn insert_after_node(&self, node: &Node<T>, item: T) -> &Node<T> {
-        unsafe {
-            let next = node.next.get().expect("has next node").as_ref();
-            let new = self.data.append_ref(
-                Node { 
-                    item: MaybeUninit::new(item), 
-                    prev: Some(node.into()).into(),
-                    next: Some(next.into()).into(),
-                }
-            );
-            node.next.set(Some(new.into()));
-            next.prev.set(Some(new.into()));
-            new
-        }
+        let node = node.get_forwarding();
+        let next = node.next_any();
+        let new = self.data.append_ref(
+            Node { 
+                item: MaybeUninit::new(item), 
+                prev: Some(node.into()).into(),
+                next: Some(next.into()).into(),
+            }
+        );
+        node.next.set(Some(new.into()));
+        next.prev.set(Some(new.into()));
+        new
     }
 
     pub fn push_back(&self, item: T) -> Ref<T> {
         unsafe {
-            let back = &*self.tail_sentinel().prev.get().expect("tail sentinel's prev ptr should be Some").as_ptr();
+            let back = self.tail_sentinel().prev_any();
             let node = self.insert_after_node(back, item);
             Ref { list: self, node }
         }
@@ -126,21 +164,15 @@ impl<T> List<T> {
 
     pub fn push_front(&self, item: T) -> Ref<T> {
         unsafe {
-            let front = &*self.head_sentinel();
+            let front = self.head_sentinel();
             let node = self.insert_after_node(front, item);
             Ref { list: self, node }
         }
     }
 
     pub fn head(&self) -> Option<Ref<T>> {
-        unsafe {
-            let node = &*self.head_sentinel().next.get().expect("head sentinel's head ptr should be Some").as_ptr();
-            if node.is_sentinel() {
-                None
-            } else {
-                Some(Ref { node, list: self })
-            }
-        }
+        let node = self.head_sentinel().next()?;
+        Some(Ref { list: self, node })
     }
 
     pub fn iter(&self) -> NodeIter<T> {
@@ -151,19 +183,21 @@ impl<T> List<T> {
     }
 
     pub fn tail(&self) -> Option<Ref<T>> {
-        unsafe {
-            let node = &*self.tail_sentinel().prev.get().expect("tail sentinel's tail ptr should be Some").as_ptr();
-            if node.is_sentinel() {
-                None
-            } else {
-                Some(Ref { node , list: self})
-            }
-        }
+        let node = self.tail_sentinel().prev()?;
+        Some(Ref { list: self, node })
+    }
+}
+
+impl<T> Default for List<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl<T> Ref<'_, T> {
-    /// detaches the node from the list. It can be added back later still.
+    /// detaches the node from the list. It cannot be added back later. The item will only be
+    /// dropped when the whole list is dropped. After detaching, inserting before or after will
+    /// cause a panic.
     pub fn detach(&self) {
         self.node.detach();
     }
@@ -177,14 +211,14 @@ impl<T> Ref<'_, T> {
 
     /// detaches self and adds a new node, returning a reference to it
     pub fn replace(&self, item: T) -> Self {
-        let ret = self.insert_after(item);
+        let ret = self.insert_before(item);
         self.detach();
         ret
     }
 
     pub fn insert_before(&self, item: T) -> Self {
         unsafe {
-            let prev = self.node.prev.get().expect("has prev node").as_ref();
+            let prev = self.node.prev_any();
             let node = self.list.insert_after_node(prev, item);
             Self { list: self.list, node }
         }
@@ -205,14 +239,14 @@ impl<T> std::ops::Deref for Ref<'_, T> {
             panic!("attempted to deref a sentinel node - this is a bug in list.rs")
         };
         unsafe {
-            self.node.item.assume_init_ref()
+            self.node.get_forwarding().item.assume_init_ref()
         }
     }
 }
 
 pub struct NodeIter<'a, T> {
     list: &'a List<T>,
-    node: &'a Node<T>
+    node: &'a Node<T>,
 }
 
 impl<T> NodeIter<'_, T> {
@@ -224,9 +258,20 @@ impl<'a, T> Iterator for NodeIter<'a, T> {
     type Item = Ref<'a, T>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        self.node = self.node.get_forwarding();
         let node = self.node.next()?;
         self.node = node;
-        Some(Ref { node, list: self.list })
+        Some(Ref { list: self.list, node })
+    }
+}
+
+impl<'a, T> IntoIterator for &'a List<T> {
+    type Item = Ref<'a, T>;
+
+    type IntoIter = NodeIter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
@@ -268,6 +313,87 @@ impl<T> Drop for List<T> {
 // Not necessarily fused
 // impl<T> FusedIterator for NodeIter<'_, T> {}
 
+/// pointer to a list node. Unsafe to promote.
+pub struct ThinRef<T>(NonNull<Node<T>>);
+
+impl<T> Clone for ThinRef<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for ThinRef<T> {}
+
+impl<T> Debug for ThinRef<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<T> From<Ref<'_, T>> for ThinRef<T> {
+    fn from(value: Ref<'_, T>) -> Self {
+        ThinRef(NonNull::from(value.node))
+    }
+}
+
+impl<T> PartialEq for ThinRef<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.as_ptr() == other.0.as_ptr()
+    }
+}
+
+impl<T> Eq for ThinRef<T> {}
+
+impl<T> PartialOrd for ThinRef<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        (self.0.as_ptr() as usize).partial_cmp(&(other.0.as_ptr() as usize))
+    }
+}
+
+impl<T> Ord for ThinRef<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.0.as_ptr() as usize).cmp(&(other.0.as_ptr() as usize))
+    }
+}
+
+impl<T> ThinRef<T> {
+    /// Promote to a ListRef. 
+    ///
+    /// Safety:
+    /// - `self` must have been created from a list ref
+    /// - `list` must be the same list this was created from
+    pub const unsafe fn promote(self, list: &List<T>) -> Ref<T> {
+        Ref {
+            list,
+            node: self.0.as_ref(),
+        }
+    }
+
+    // https://internals.rust-lang.org/t/get-the-offset-of-a-field-from-the-base-of-a-struct/14163/6
+    fn item_offset() -> usize {
+        let dummy = MaybeUninit::<Node<T>>::uninit();
+        let base_ptr = dummy.as_ptr();
+        let member_ptr = unsafe{ core::ptr::addr_of!((*base_ptr).item) };
+        member_ptr as usize - base_ptr as usize
+    }
+
+    /// Create a `ThinRef` from a reference to a item in a list.
+    /// 
+    /// ### Safety:
+    /// - `item` is a reference to an item added to a [`List`]
+    /// - violating this constraint may cause instant UB
+    pub unsafe fn from_element_ref(item: &T) -> Self {
+        assert!(std::mem::size_of_val(item) < isize::MAX as usize);
+        let ptr = item as *const T;
+        let node = ptr.byte_sub(Self::item_offset());
+        Self(NonNull::new_unchecked(node as *mut Node<T>))
+    }
+
+    pub fn addr(self) -> usize {
+        self.0.as_ptr().wrapping_byte_add(Self::item_offset()) as usize
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -287,9 +413,11 @@ mod test {
         let l = List::from([1, 2, 3]);
         let mut it = l.iter();
         assert_eq!(it.next().as_deref(), Some(&1));
-        let Some(next) = it.next() else { panic!() };
+
+        let next = it.next().unwrap();
         assert_eq!(*next, 2);
         next.insert_after(4);
+
         assert_eq!(it.next().as_deref(), Some(&4));
         assert_eq!(it.next().as_deref(), Some(&3));
         assert_eq!(it.next().as_deref(), None);
@@ -342,4 +470,83 @@ mod test {
         assert_eq!(l.iter().map(|i| *i).collect::<Vec<_>>(), vec![]);
     }
 
+    #[test]
+    fn detach_iter() {
+        let l = List::from([1, 2, 3, 4]);
+        let mut it = l.iter();
+
+        let next = it.next().unwrap();
+        assert_eq!(*next, 1);
+        next.detach();
+
+        let next = it.next().unwrap();
+        assert_eq!(*next, 2);
+        next.detach();
+
+        let next = it.next().unwrap();
+        assert_eq!(*next, 3);
+        next.detach();
+
+        let next = it.next().unwrap();
+        assert_eq!(*next, 4);
+        next.detach();
+
+        assert_eq!(l.iter().map(|i| *i).collect::<Vec<_>>(), vec![]);
+    }
+
+    #[test]
+    fn detach_and_insert() {
+        let l = List::from([1, 2, 3, 4]);
+        let mut it = l.iter();
+
+        assert_eq!(it.next().as_deref(), Some(&1));
+
+        let next = it.next().unwrap();
+        assert_eq!(*next, 2);
+        next.insert_before(-2);
+        next.insert_before(-1);
+        next.insert_after(5);
+        next.insert_after(6);
+        next.detach();
+        // dbg!(unsafe { it.node.item.assume_init_ref() });
+        // dbg!(unsafe { it.node.next_any().item.assume_init_ref() });
+        // dbg!(&l);
+
+        assert_eq!(it.next().as_deref(), Some(&6));
+        assert_eq!(it.next().as_deref(), Some(&5));
+        assert_eq!(it.next().as_deref(), Some(&3));
+        assert_eq!(it.next().as_deref(), Some(&4));
+        assert_eq!(it.next().as_deref(), None);
+    }
+
+    #[test]
+    fn replacing() {
+        let l = List::from([1, 2, 3]);
+        let mut it = l.iter();
+        assert_eq!(it.next().as_deref(), Some(&1));
+
+        let next = it.next().unwrap();
+        assert_eq!(*next, 2);
+        next.replace(4);
+        assert_eq!(*next, 4);
+
+        assert_eq!(it.next().as_deref(), Some(&3));
+    }
+
+    #[test]
+    fn replace_and_insert() {
+        let l = List::from([1, 2, 3]);
+        let mut it = l.iter();
+        assert_eq!(it.next().as_deref(), Some(&1));
+
+        let next = it.next().unwrap();
+        assert_eq!(*next, 2);
+        next.replace(4);
+        assert_eq!(*next, 4);
+        next.insert_before(5);
+        next.insert_after(6);
+
+        assert_eq!(it.next().as_deref(), Some(&6));
+        assert_eq!(it.next().as_deref(), Some(&3));
+    }
 }
