@@ -750,7 +750,7 @@ impl Parser {
         match a {
             rules::Arg::Reg(r) => idents.lookup(r).into(),
             rules::Arg::Literal(rules::Literal::StrLiteral(s)) => {
-                let gid = Binding::new_virtual();
+                let gid = Binding::new_ir_bind();
                 globals.insert(
                     gid,
                     GlobalData {
@@ -851,7 +851,7 @@ impl Parser {
     pub fn parse(mut self) -> ParsedFile {
         let rules::FunctionDef(_, _, fn_name, args, _) = self.expect::<rules::FunctionDef>();
         let args = rules::collect_decl_args(args);
-        let mut idents = BindMap::new(Binding::new_virtual);
+        let mut idents = BindMap::new(Binding::new_ir_bind);
         let mut blocks = BlockMap::new(BlockId::new);
         for (_, arg) in args {
             idents.assign(arg);

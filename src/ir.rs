@@ -53,6 +53,7 @@ const BASE_OP: BasicInstrProp = BasicInstrProp {
     has_side_effects: true,
     may_read_memory: true,
     may_write_memory: true,
+    is_barrier: false,
     operand_relative_type_constraints: &[0, 0, 0],
     simulation: None
 };

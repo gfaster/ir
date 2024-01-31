@@ -1,7 +1,10 @@
+use crate::warn_once;
+use crate::attr::BindAttributes;
 use crate::list::List;
 use crate::list::ThinRef;
 use crate::reg::Binding;
-use crate::reg::Virtual;
+use crate::reg::MachineReg;
+use crate::reg::IrBinding;
 use crate::InstrArg;
 use crate::Instruction;
 use crate::vec_map::VecSet;
@@ -49,7 +52,8 @@ impl PhysRegUse {
 #[derive(Debug)]
 struct SSARegState {
     defined_by: ThinRef<Instruction>,
-    used_by: VecSet<ThinRef<Instruction>>
+    used_by: VecSet<ThinRef<Instruction>>,
+    attrs: BindAttributes,
 }
 
 impl SSARegState {
@@ -84,7 +88,9 @@ impl FromIterator<Instruction> for SSAState {
                 regs.entry(def).and_modify(|_| panic!("double definition of {def}")).or_insert(SSARegState {
                     defined_by: instr.into(),
                     used_by: VecSet::new(),
+                    attrs: BindAttributes::new(crate::ty::Type::i64())
                 });
+                warn_once!("TODO: specify type here");
             }
             for used in instr.read_bindings() {
                 let Some(state) = regs.get_mut(&used) else {panic!("use of {used} without def")};
@@ -97,6 +103,36 @@ impl FromIterator<Instruction> for SSAState {
 }
 
 impl SSAState {
+    pub fn machine_reg_use(&self, instr: &Instruction, reg: MachineReg) -> Option<&Instruction> {
+        assert!(self.is_instr_in_state(instr));
+
+        // Safety: instr is in list
+        unsafe { self.machine_reg_use_unchecked(instr, reg) }
+    }
+
+    pub unsafe fn machine_reg_use_unchecked(&self, instr: &Instruction, reg: MachineReg) -> Option<&Instruction> {
+        let instr = ThinRef::from_element_ref(instr).promote(&self.list);
+        for instr in instr.make_iter() {
+            if instr.is_branch() {
+                /// TODO: maintain physical regs through branches
+                return None;
+            }
+            // let Some( machine ) = instr.
+        }
+        todo!()
+    }
+
+    /// Entry point for machine optimizations
+    pub fn optimize(&mut self) {
+        let list = self.list.clone();
+        todo!()
+    }
+
+    pub fn bind_attrs(&self, bind: Binding) -> &BindAttributes {
+        let state = self.regs.get(&bind).unwrap_or_else(|| panic!("bind {bind} was never defined"));
+        &state.attrs
+    }
+
     pub fn defining_instr(&self, bind: Binding) -> impl Deref<Target = Instruction> + '_ {
         let state = self.regs.get(&bind).unwrap_or_else(|| panic!("bind {bind} was never defined"));
         // Safety: thinref was created in list
@@ -109,8 +145,19 @@ impl SSAState {
         self.instrs.contains(&(instr as *const _ as usize))
     }
 
+    pub fn update_bind_attrs(&mut self, bind: Binding, attr: BindAttributes) {
+        let state = self.regs.get_mut(&bind).unwrap_or_else(|| panic!("bind {bind} was never defined"));
+        debug_assert_eq!(state.attrs.ty(), attr.ty(), "attribute type can't be different");
+        state.attrs = attr
+    }
+
+    pub fn replace_instr(&mut self, old: &Instruction, new: Instruction) {
+        assert!(self.is_instr_in_state(old));
+        unsafe { self.replace_instr_unchecked(old, new) }
+    }
+
     /// Safety: caller must uphold that old is in the list
-    unsafe fn replace_instr(&mut self, old: &Instruction, new: Instruction) {
+    pub unsafe fn replace_instr_unchecked(&mut self, old: &Instruction, new: Instruction) {
         // Safety: caller must uphold that old is in the list
         let old = unsafe { ThinRef::from_element_ref(old).promote(&self.list) };
         let new = old.replace(new);
@@ -133,7 +180,7 @@ impl SSAState {
         let no_uses = instr.defined_bindings().map(|b| {
             self.regs[&b].is_unused()
         }).all(std::convert::identity);
-        no_uses && !instr.has_side_effects()
+        no_uses && !instr.is_movable()
     }
 
     /// get rid of unused instructions
@@ -186,7 +233,7 @@ pub enum PhysRegDefinednessState {
     Clobbered,
 
     /// holds value of the contained virtual register
-    Virtual(Virtual),
+    Virtual(IrBinding),
 }
 
 /// physical register state, expected to mutate during codegen

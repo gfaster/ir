@@ -1,6 +1,6 @@
 use std::{ops::{RangeBounds, Bound}, sync::{Arc, Mutex, MutexGuard}, collections::{BTreeSet, BTreeMap}};
 
-use crate::{ty::Type, reg::Binding};
+use crate::{ty::Type, reg::{Binding, Immediate}};
 
 mod valid_range;
 use valid_range::KnownVal;
@@ -13,7 +13,19 @@ pub struct BindAttributes {
 }
 
 impl BindAttributes {
-    pub fn new(ty: Type) -> Self {
+    pub fn ty(&self) -> Type {
+        self.ty
+    }
+
+    pub const fn from_imm(ty: Type, imm: Immediate) -> Self {
+        Self {
+            ty,
+            name: None,
+            val: KnownVal::from_imm(imm),
+        }
+    }
+
+    pub const fn new(ty: Type) -> Self {
         Self {
             ty,
             name: None,
@@ -40,6 +52,17 @@ impl BindAttributes {
     /// - *more to be added*
     pub fn constrain_val(&mut self, lhs: &Self, rhs: &Self, f: impl Fn(u64, u64) -> Option<u64>) {
         self.val = KnownVal::apply_op_conservative(self.ty, f, &lhs.val, &rhs.val);
+    }
+
+    /// constrain the known value to the possible results of `f`, returning a new attrs
+    ///
+    /// `f` must satisfy the following properties:
+    /// - returns `None` if the operation causes poison
+    /// - *more to be added*
+    pub fn constrain_val_pure(&self, lhs: &Self, rhs: &Self, f: impl Fn(u64, u64) -> Option<u64>) -> Self {
+        let mut new = self.clone();
+        new.val = KnownVal::apply_op_conservative(self.ty, f, &lhs.val, &rhs.val);
+        new
     }
 
     pub fn as_known_val(&self) -> Option<u64> {

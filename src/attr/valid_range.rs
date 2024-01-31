@@ -1,6 +1,6 @@
 use std::ops::{Bound, RangeBounds};
 
-use crate::ty::Type;
+use crate::{ty::Type, reg::Immediate};
 
 #[derive(Debug, Clone)]
 pub(super) enum KnownVal {
@@ -32,7 +32,11 @@ pub(super) enum KnownVal {
 }
 
 impl KnownVal {
-    pub fn new() -> Self {
+    pub const fn from_imm(imm: Immediate) -> Self {
+        Self::Known(imm.0 as u64)
+    }
+
+    pub const fn new() -> Self {
         Self::Unknown
     }
 

@@ -1,12 +1,20 @@
-use std::{cell::Cell, ptr::{NonNull, addr_of}, mem::MaybeUninit, iter::FusedIterator, fmt::Debug};
+use std::{cell::Cell, ptr::{NonNull, addr_of}, mem::MaybeUninit, iter::FusedIterator, fmt::Debug, default};
 
-use crate::appendvec::AppendVec;
+use crate::{appendvec::AppendVec, tagged_ptr::TPtr};
 
 
 type ListPtr<T> = Option<NonNull<Node<T>>>;
 
 pub struct List<T> {
     data: AppendVec<Node<T>>,
+}
+
+// https://internals.rust-lang.org/t/get-the-offset-of-a-field-from-the-base-of-a-struct/14163/6
+fn item_offset<T>() -> usize {
+    let dummy = MaybeUninit::<Node<T>>::uninit();
+    let base_ptr = dummy.as_ptr();
+    let member_ptr = unsafe{ core::ptr::addr_of!((*base_ptr).item) };
+    member_ptr as usize - base_ptr as usize
 }
 
 /// Linked List Node
@@ -194,7 +202,7 @@ impl<T> Default for List<T> {
     }
 }
 
-impl<T> Ref<'_, T> {
+impl<'a, T> Ref<'a, T> {
     /// detaches the node from the list. It cannot be added back later. The item will only be
     /// dropped when the whole list is dropped. After detaching, inserting before or after will
     /// cause a panic.
@@ -222,6 +230,10 @@ impl<T> Ref<'_, T> {
             let node = self.list.insert_after_node(prev, item);
             Self { list: self.list, node }
         }
+    }
+
+    pub fn make_iter(self) -> NodeIter<'a, T> {
+        NodeIter { list: self.list, node: self.node }
     }
 }
 
@@ -314,7 +326,7 @@ impl<T> Drop for List<T> {
 // impl<T> FusedIterator for NodeIter<'_, T> {}
 
 /// pointer to a list node. Unsafe to promote.
-pub struct ThinRef<T>(NonNull<Node<T>>);
+pub struct ThinRef<T>(TPtr<Node<T>>);
 
 impl<T> Clone for ThinRef<T> {
     fn clone(&self) -> Self {
@@ -332,13 +344,13 @@ impl<T> Debug for ThinRef<T> {
 
 impl<T> From<Ref<'_, T>> for ThinRef<T> {
     fn from(value: Ref<'_, T>) -> Self {
-        ThinRef(NonNull::from(value.node))
+        unsafe { ThinRef(value.list.data.ref_to_ptr(value.node)) }
     }
 }
 
 impl<T> PartialEq for ThinRef<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.0.as_ptr() == other.0.as_ptr()
+        self.0 == other.0
     }
 }
 
@@ -346,13 +358,13 @@ impl<T> Eq for ThinRef<T> {}
 
 impl<T> PartialOrd for ThinRef<T> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        (self.0.as_ptr() as usize).partial_cmp(&(other.0.as_ptr() as usize))
+        (self.0.ptr() as usize).partial_cmp(&(other.0.ptr() as usize))
     }
 }
 
 impl<T> Ord for ThinRef<T> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.0.as_ptr() as usize).cmp(&(other.0.as_ptr() as usize))
+        (self.0.ptr() as usize).cmp(&(other.0.ptr() as usize))
     }
 }
 
@@ -362,19 +374,23 @@ impl<T> ThinRef<T> {
     /// Safety:
     /// - `self` must have been created from a list ref
     /// - `list` must be the same list this was created from
-    pub const unsafe fn promote(self, list: &List<T>) -> Ref<T> {
+    pub unsafe fn promote_unchecked(self, list: &List<T>) -> Ref<T> {
         Ref {
             list,
-            node: self.0.as_ref(),
+            node: &*self.0.ptr(),
         }
     }
 
-    // https://internals.rust-lang.org/t/get-the-offset-of-a-field-from-the-base-of-a-struct/14163/6
-    fn item_offset() -> usize {
-        let dummy = MaybeUninit::<Node<T>>::uninit();
-        let base_ptr = dummy.as_ptr();
-        let member_ptr = unsafe{ core::ptr::addr_of!((*base_ptr).item) };
-        member_ptr as usize - base_ptr as usize
+    pub fn try_promote(self, list: &List<T>) -> Option<Ref<T>> {
+        let node = list.data.try_ptr_deref(self.0)?;
+        Some(Ref { list, node })
+    }
+
+    pub fn promote(self, list: &List<T>) -> Ref<T> {
+        let Some(lref) = self.try_promote(list) else {
+            panic!("ThinRef does not belong to list");
+        };
+        lref
     }
 
     /// Create a `ThinRef` from a reference to a item in a list.
@@ -382,15 +398,17 @@ impl<T> ThinRef<T> {
     /// ### Safety:
     /// - `item` is a reference to an item added to a [`List`]
     /// - violating this constraint may cause instant UB
+    #[deprecated]
     pub unsafe fn from_element_ref(item: &T) -> Self {
-        assert!(std::mem::size_of_val(item) < isize::MAX as usize);
-        let ptr = item as *const T;
-        let node = ptr.byte_sub(Self::item_offset());
-        Self(NonNull::new_unchecked(node as *mut Node<T>))
+        // assert!(std::mem::size_of_val(item) < isize::MAX as usize);
+        // let ptr = item as *const T;
+        // let node = ptr.byte_sub(item_offset::<T>());
+        unimplemented!()
     }
 
+    #[deprecated]
     pub fn addr(self) -> usize {
-        self.0.as_ptr().wrapping_byte_add(Self::item_offset()) as usize
+        self.0.ptr().wrapping_byte_add(item_offset::<T>()) as usize
     }
 }
 

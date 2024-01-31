@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{reg::Virtual, OperationalValidity};
+use crate::{reg::IrBinding, OperationalValidity};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StackSlotState {

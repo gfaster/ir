@@ -4,7 +4,10 @@ use crate::{IdTy, vec_map::VecMap, Instruction, ty::Type};
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct InstrArg (ArgTy);
+pub struct InstrArg (InstrArgTy);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MachineArg (MachArgTy);
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Binding (BindTy);
@@ -13,7 +16,13 @@ pub struct Binding (BindTy);
 pub struct MachineReg(u16);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Virtual(usize);
+pub struct IrBinding(usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Virtual(usize, RegBank);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RegBank(pub u8);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Immediate(pub usize);
@@ -48,11 +57,14 @@ pub mod bind_names {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match &self.0 {
                 BindDispInner::Named(s) => s.fmt(f),
+                BindDispInner::Unknown(Binding(BindTy::IrBinding(v))) => {
+                    write!(f, "{}", v.0)
+                },
                 BindDispInner::Unknown(Binding(BindTy::Virtual(v))) => {
-                    write!(f, "%{}", v.0)
+                    write!(f, "{}", v.0)
                 },
                 BindDispInner::Unknown(Binding(BindTy::Machine(m))) => {
-                    m.fmt(f)
+                    write!(f, "{m}")
                 },
                 BindDispInner::Unknown(Binding(BindTy::Block(b))) => {
                     write!(f, "{}", b.0)
@@ -80,8 +92,8 @@ impl InstrArg {
         self.0.as_binding()?.as_machine()
     }
 
-    pub fn as_virtual(&self) -> Option<Virtual> {
-        self.0.as_binding()?.as_virtual()
+    pub fn as_ir_bind(&self) -> Option<IrBinding> {
+        self.0.as_binding()?.as_ir_bind()
     }
 
     pub fn as_label(&self) -> Option<BlockId> {
@@ -96,20 +108,42 @@ impl InstrArg {
         self.0.as_binding().is_some_and(|b| b.is_machine())
     }
 
-    pub fn is_virtual(&self) -> bool {
-        self.0.as_binding().is_some_and(|b| b.is_virtual())
+    pub fn is_ir(&self) -> bool {
+        self.0.as_binding().is_some_and(|b| b.is_ir())
     }
 
     pub fn is_imm(&self) -> bool {
         self.as_imm().is_some()
     }
 
-    pub fn new_virtual() -> Self {
-        Virtual::new().into()
+    pub fn new_ir_bind() -> Self {
+        IrBinding::new().into()
     }
 
     pub fn new_block() -> Self {
         BlockId::new().into()
+    }
+}
+
+impl MachineArg {
+    pub fn as_machine(&self) -> Option<MachineReg> {
+        self.0.as_machine()
+    }
+
+    pub fn as_label(&self) -> Option<BlockId> {
+        self.0.as_label()
+    }
+
+    pub fn as_imm(&self) -> Option<Immediate> {
+        self.0.as_imm()
+    }
+
+    pub fn is_machine(&self) -> bool {
+        self.0.as_machine().is_some()
+    }
+
+    pub fn is_imm(&self) -> bool {
+        self.as_imm().is_some()
     }
 }
 
@@ -118,8 +152,8 @@ impl Binding {
         self.0.as_machine()
     }
 
-    pub fn as_virtual(&self) -> Option<Virtual> {
-        self.0.as_virtual()
+    pub fn as_ir_bind(&self) -> Option<IrBinding> {
+        self.0.as_ir_bind()
     }
 
     pub fn as_label(&self) -> Option<BlockId> {
@@ -130,90 +164,146 @@ impl Binding {
         self.0.is_machine()
     }
 
-    pub fn is_virtual(&self) -> bool {
-        self.0.is_virtual()
+    pub fn is_ir(&self) -> bool {
+        self.0.is_ir_bind()
     }
 
     pub fn is_label(&self) -> bool {
         self.0.is_label()
     }
 
-    pub fn new_virtual() -> Self {
-        Virtual::new().into()
+    pub fn new_ir_bind() -> Self {
+        IrBinding::new().into()
     }
 }
 
-impl Virtual {
-    fn new() -> Self {
-        static CNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let id = CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Virtual(id)
+mod sealed {
+    use super::*;
+    static CNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    impl Virtual {
+        pub fn new(bank: RegBank) -> Self {
+            let id = CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Virtual(id, bank)
+        }
+    }
+
+    impl IrBinding {
+        pub fn new() -> Self {
+            let id = CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            IrBinding(id)
+        }
+    }
+}
+
+impl RegBank {
+    const fn new(id: u8) -> Self {
+        Self(id)
+    }
+
+    const fn as_idx(self) -> usize {
+        self.0 as usize
     }
 }
 
 impl From<Binding> for InstrArg {
     fn from(v: Binding) -> Self {
-        InstrArg (ArgTy::Binding(v))
+        InstrArg (InstrArgTy::Binding(v))
     }
 }
 
 impl From<MachineReg> for InstrArg {
     fn from(v: MachineReg) -> Self {
         let b: Binding = v.into();
-        InstrArg (ArgTy::Binding(b))
+        InstrArg (InstrArgTy::Binding(b))
     }
 }
 
 impl From<BlockId> for InstrArg {
     fn from(v: BlockId) -> Self {
         let b: Binding = v.into();
-        InstrArg (ArgTy::Binding(b))
+        InstrArg (InstrArgTy::Binding(b))
     }
 }
 
-impl From<Virtual> for InstrArg {
-    fn from(v: Virtual) -> Self {
+impl From<IrBinding> for InstrArg {
+    fn from(v: IrBinding) -> Self {
         let b: Binding = v.into();
-        InstrArg (ArgTy::Binding(b))
+        InstrArg (InstrArgTy::Binding(b))
     }
 }
 
 impl From<Immediate> for InstrArg {
     fn from(v: Immediate) -> Self {
-        InstrArg ( ArgTy::Imm(v))
+        InstrArg ( InstrArgTy::Imm(v))
     }
 }
 
+impl From<Virtual> for InstrArg {
+    fn from(v: Virtual) -> Self {
+        InstrArg ( InstrArgTy::Binding(Binding(BindTy::Virtual(v))))
+    }
+}
+
+impl From<MachineArg> for InstrArg {
+    fn from(v: MachineArg) -> Self {
+        match v.0 {
+            MachArgTy::Virtual(v) => v.into(),
+            MachArgTy::Machine(m) => m.into(),
+            MachArgTy::Imm(i) => i.into(),
+            MachArgTy::Block(b) => b.into(),
+        }
+    }
+}
+
+
 impl From<&Binding> for InstrArg {
     fn from(&v: &Binding) -> Self {
-        InstrArg (ArgTy::Binding(v))
+        InstrArg (InstrArgTy::Binding(v))
     }
 }
 
 impl From<&MachineReg> for InstrArg {
     fn from(&v: &MachineReg) -> Self {
         let b: Binding = v.into();
-        InstrArg (ArgTy::Binding(b))
+        InstrArg (InstrArgTy::Binding(b))
     }
 }
 
 impl From<&BlockId> for InstrArg {
     fn from(&v: &BlockId) -> Self {
         let b: Binding = v.into();
-        InstrArg (ArgTy::Binding(b))
+        InstrArg (InstrArgTy::Binding(b))
     }
 }
 
-impl From<&Virtual> for InstrArg {
-    fn from(&v: &Virtual) -> Self {
+impl From<&IrBinding> for InstrArg {
+    fn from(&v: &IrBinding) -> Self {
         let b: Binding = v.into();
-        InstrArg (ArgTy::Binding(b))
+        InstrArg (InstrArgTy::Binding(b))
     }
 }
 
 impl From<&Immediate> for InstrArg {
     fn from(&v: &Immediate) -> Self {
-        InstrArg ( ArgTy::Imm(v))
+        InstrArg ( InstrArgTy::Imm(v))
+    }
+}
+
+impl From<&Virtual> for InstrArg {
+    fn from(&v: &Virtual) -> Self {
+        InstrArg ( InstrArgTy::Binding(Binding(BindTy::Virtual(v))))
+    }
+}
+
+impl From<&MachineArg> for InstrArg {
+    fn from(&v: &MachineArg) -> Self {
+        v.into()
+    }
+}
+
+impl From<Virtual> for Binding {
+    fn from(v: Virtual) -> Self {
+        Binding (BindTy::Virtual(v))
     }
 }
 
@@ -223,9 +313,9 @@ impl From<MachineReg> for Binding {
     }
 }
 
-impl From<Virtual> for Binding {
-    fn from(v: Virtual) -> Self {
-        Binding ( BindTy::Virtual(v))
+impl From<IrBinding> for Binding {
+    fn from(v: IrBinding) -> Self {
+        Binding ( BindTy::IrBinding(v))
     }
 }
 
@@ -235,14 +325,20 @@ impl From<BlockId> for Binding {
     }
 }
 
+impl From<&Virtual> for Binding {
+    fn from(&v: &Virtual) -> Self {
+        Binding (BindTy::Virtual(v))
+    }
+}
+
 impl From<&MachineReg> for Binding {
     fn from(&v: &MachineReg) -> Self {
         v.into()
     }
 }
 
-impl From<&Virtual> for Binding {
-    fn from(&v: &Virtual) -> Self {
+impl From<&IrBinding> for Binding {
+    fn from(&v: &IrBinding) -> Self {
         v.into()
     }
 }
@@ -256,20 +352,21 @@ impl From<&BlockId> for Binding {
 impl std::fmt::Debug for Binding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.0 {
-            BindTy::Virtual(v) => Display::fmt(&v, f),
+            BindTy::IrBinding(i) => Display::fmt(&i, f),
             BindTy::Machine(m) => Display::fmt(&m, f),
             BindTy::Block(b) => Display::fmt(&b, f),
+            BindTy::Virtual(v) => Display::fmt(&v, f),
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum ArgTy {
+enum InstrArgTy {
     Binding(Binding),
     Imm(Immediate),
 }
 
-impl ArgTy {
+impl InstrArgTy {
     fn as_binding(&self) -> Option<Binding> {
         if let Self::Binding(v) = self {
             Some(*v)
@@ -289,7 +386,10 @@ impl ArgTy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum BindTy {
-    /// virtual register: infinite 
+    /// generic register: infinite and flexible
+    IrBinding(IrBinding),
+
+    /// virtual register: has an infinite ID, but corresponds with a set of registers
     Virtual(Virtual),
 
     /// Machine register: corresponds with a machine register (e.g. `rax`)
@@ -299,16 +399,13 @@ enum BindTy {
 }
 
 impl BindTy {
-    /// Returns `true` if the lval ty is [`Virtual`].
-    ///
-    /// [`Virtual`]: LvalTy::Virtual
     #[must_use]
-    fn is_virtual(&self) -> bool {
-        matches!(self, Self::Virtual(..))
+    fn is_ir_bind(&self) -> bool {
+        matches!(self, Self::IrBinding(..))
     }
 
-    fn as_virtual(&self) -> Option<Virtual> {
-        if let Self::Virtual(v) = self {
+    fn as_ir_bind(&self) -> Option<IrBinding> {
+        if let Self::IrBinding(v) = self {
             Some(*v)
         } else {
             None
@@ -348,6 +445,54 @@ impl BindTy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MachArgTy {
+    /// generic register: infinite, but constrained to a register bank
+    Virtual(Virtual),
+
+    /// Machine register: corresponds with a machine register (e.g. `rax`)
+    Machine(MachineReg),
+
+    /// Immediate, possibly needs to be truncated
+    Imm(Immediate),
+
+    Block(BlockId),
+}
+
+impl MachArgTy {
+    fn as_imm(&self) -> Option<Immediate> {
+        if let Self::Imm(v) = self {
+            Some(*v)
+        } else {
+            None
+        }
+    }
+
+    fn as_machine(&self) -> Option<MachineReg> {
+        if let Self::Machine(v) = self {
+            Some(*v)
+        } else {
+            None
+        }
+    }
+
+    fn as_virtual(&self) -> Option<Virtual> {
+        if let Self::Virtual(v) = self {
+            Some(*v)
+        } else {
+            None
+        }
+    }
+
+    fn as_label(&self) -> Option<BlockId> {
+        if let Self::Block(v) = self {
+            Some(*v)
+        } else {
+            None
+        }
+    }
+}
+
 impl MachineReg {
     pub const fn from_idx(phys: u16) -> Self {
         Self(phys)
@@ -372,11 +517,19 @@ impl std::fmt::Display for BlockId {
     }
 }
 
+impl std::fmt::Display for IrBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let b: Binding = self.into();
+        let name = bind_names::bind_name(b);
+        write!(f, "%{name}")
+    }
+}
+
 impl std::fmt::Display for Virtual {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let b: Binding = self.into();
         let name = bind_names::bind_name(b);
-        write!(f, "{name}")
+        write!(f, "%{name}")
     }
 }
 
@@ -397,8 +550,8 @@ impl BlockId {
 impl std::fmt::Display for InstrArg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.0 {
-            ArgTy::Binding(b) => b.fmt(f),
-            ArgTy::Imm(i) => i.fmt(f),
+            InstrArgTy::Binding(b) => b.fmt(f),
+            InstrArgTy::Imm(i) => i.fmt(f),
         }
     }
 }
@@ -406,10 +559,10 @@ impl std::fmt::Display for InstrArg {
 impl std::fmt::Display for Binding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.0 {
-            BindTy::Virtual(v) => v.fmt(f),
+            BindTy::IrBinding(v) => v.fmt(f),
             BindTy::Machine(m) => m.fmt(f),
             BindTy::Block(b) => b.fmt(f),
+            BindTy::Virtual(v) => v.fmt(f),
         }
     }
 }
-

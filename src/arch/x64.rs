@@ -2,7 +2,7 @@
 use crate::{instr::{MachineInstrProp, BasicInstrProp, ArgCnt}, regstate::PhysRegUse};
 
 pub mod r {
-    use crate::reg::MachineReg;
+    use crate::{reg::{MachineReg, RegBank}, arch::RegBankInfo};
 
     macro_rules! machine_regs {
         (@decl $($name:ident: $val:literal);*) => {
@@ -65,6 +65,13 @@ pub mod r {
     }
 
     impl Reg {
+        pub const fn bank(&self) -> RegBank {
+            match self {
+                Reg::Eflags => RegBank(1),
+                _ => RegBank(0),
+            }
+        }
+
         pub const fn gprs() -> &'static [Self] {
             &[
                 Self::Rax,
@@ -81,6 +88,10 @@ pub mod r {
                 Self::R14,
                 Self::R15,
             ]
+        }
+
+        pub const fn can_mov_to(&self, other: &Self) -> bool {
+            self.bank().0 == other.bank().0
         }
 
         /// whether this register can be used as a mov src
@@ -103,6 +114,17 @@ pub mod r {
             Self::from_idx(mr.idx())
         }
     }
+
+    pub const REG_BANK_INFO: [RegBankInfo; 2] = [
+        RegBankInfo {
+            transfer_cost: &[0, u16::MAX],
+            name: "gpr",
+        },
+        RegBankInfo {
+            transfer_cost: &[0, u16::MAX],
+            name: "flags",
+        },
+    ];
 }
 
 const BASIC_TEMPLATE: BasicInstrProp = BasicInstrProp {
@@ -116,6 +138,7 @@ const BASIC_TEMPLATE: BasicInstrProp = BasicInstrProp {
     has_side_effects: true,
     may_read_memory: true,
     may_write_memory: true,
+    is_barrier: false,
     operand_relative_type_constraints: &[],
     simulation: None,
 };
@@ -131,6 +154,7 @@ const BASIC_TEMPLATE_SIMPLE: BasicInstrProp = BasicInstrProp {
     has_side_effects: false,
     may_read_memory: false,
     may_write_memory: false,
+    is_barrier: false,
     operand_relative_type_constraints: &[],
     simulation: None,
 };

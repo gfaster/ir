@@ -33,6 +33,8 @@ mod fold;
 mod appendvec;
 mod list;
 mod regstate;
+mod value;
+mod tagged_ptr;
 
 mod parse;
 use asm::{AsmOp, OpTarget};
@@ -51,6 +53,15 @@ type VarSet = Rc<BTreeMap<Binding, Arc<str>>>;
 type IdTy = usize;
 
 
+#[macro_export]
+macro_rules! warn_once {
+    ($($tt:tt)*) => {
+        {
+            static WARN_CELL: ::std::sync::OnceLock<()> = ::std::sync::OnceLock::new();
+            WARN_CELL.get_or_init(|| eprintln!($($tt)*));
+        }
+    };
+}
 
 #[derive(Debug, Clone, Copy)]
 enum OperationalValidity {
@@ -87,6 +98,13 @@ impl Val {
         match self {
             Val::GlobalBinding(b) => Some(*b),
             Val::Binding(b) => b.as_binding(),
+        }
+    }
+
+    pub fn as_arg(&self) -> InstrArg {
+        match self {
+            Val::GlobalBinding(b) => b.into(),
+            Val::Binding(b) => *b,
         }
     }
 }
