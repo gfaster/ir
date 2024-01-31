@@ -1,9 +1,9 @@
+use crate::reg::Binding;
+use crate::reg::BlockId;
 use crate::Ctx;
 use crate::InstrArg;
 use crate::Reg;
 use crate::VarSet;
-use crate::reg::Binding;
-use crate::reg::BlockId;
 use crate::{AsmOp, CallType, OpTarget};
 
 use std::collections::BTreeMap;

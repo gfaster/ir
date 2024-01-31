@@ -1,10 +1,11 @@
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
-use std::{num::NonZeroUsize, cell::{UnsafeCell, Cell}};
+use std::{
+    cell::{Cell, UnsafeCell},
+    num::NonZeroUsize,
+};
 
 use crate::tagged_ptr::{PtrTag, TPtr};
-
-
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Idx(NonZeroUsize);
@@ -52,14 +53,14 @@ struct AppendVecInner<T> {
     /// particular, it should always refer to the number of contiguous elements of vals that
     /// initialized.
     cnt: Cell<usize>,
-    vals: [UnsafeCell<MaybeUninit<T>>; 50]
+    vals: [UnsafeCell<MaybeUninit<T>>; 50],
 }
 
 impl<T> AppendVecInner<T> {
     // fn new(start: usize, prev: Option<&Self>) -> Box<Self> {
     fn new(start: usize) -> NonNull<Self> {
         unsafe {
-            NonNull::new_unchecked(Box::into_raw(Box::new( Self {
+            NonNull::new_unchecked(Box::into_raw(Box::new(Self {
                 // prev: prev.map_or(ptr::null(), |p| p as *const Self),
                 next: Cell::new(None),
                 start,
@@ -88,12 +89,16 @@ impl<T> Drop for AppendVecInner<T> {
 pub struct AppendVec<T> {
     inner: NonNull<AppendVecInner<T>>,
     tag: PtrTag,
-    len: Cell<usize>
+    len: Cell<usize>,
 }
 
 impl<T> AppendVec<T> {
     pub fn new() -> Self {
-        AppendVec { inner: AppendVecInner::new(0), tag: PtrTag::new::<T>(), len: 0.into() }
+        AppendVec {
+            inner: AppendVecInner::new(0),
+            tag: PtrTag::new::<T>(),
+            len: 0.into(),
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -109,7 +114,8 @@ impl<T> AppendVec<T> {
                     seg = next.as_ref()
                 } else {
                     let start = seg.start + seg.vals.len();
-                    seg.next.set(Some(NonNull::from(AppendVecInner::new(start))));
+                    seg.next
+                        .set(Some(NonNull::from(AppendVecInner::new(start))));
                     seg = (seg.next.get()).as_ref().unwrap().as_ref()
                 }
             }
@@ -144,9 +150,7 @@ impl<T> AppendVec<T> {
     /// append `val` and get a tagged pointer to it
     pub fn append_tptr(&self, val: T) -> TPtr<T> {
         let vref = self.append_ref(val);
-        unsafe {
-            TPtr::new(self.tag, vref)
-        }
+        unsafe { TPtr::new(self.tag, vref) }
     }
 
     pub fn get(&self, idx: usize) -> Option<&T> {
@@ -161,10 +165,10 @@ impl<T> AppendVec<T> {
 
     pub fn iter(&self) -> AppendVecIter<T> {
         unsafe {
-        AppendVecIter {
-            ptr: self.inner.as_ref(),
-            idx: 0,
-        }
+            AppendVecIter {
+                ptr: self.inner.as_ref(),
+                idx: 0,
+            }
         }
     }
 
@@ -236,7 +240,10 @@ impl<T> AppendVec<T> {
 
     /// dereferences ptr if it points to a valid element of the array, otherwise panics
     pub fn ptr_to_ref(&self, ptr: TPtr<T>) -> &T {
-        assert!(self.contains_ptr(ptr), "{ptr:?} is not contained by appendvec");
+        assert!(
+            self.contains_ptr(ptr),
+            "{ptr:?} is not contained by appendvec"
+        );
         unsafe { &*ptr.ptr() }
     }
 
@@ -256,15 +263,17 @@ impl<T> Drop for AppendVec<T> {
             let mut ptr = self.inner.as_ptr();
             while !ptr.is_null() {
                 let mut bx = Box::from_raw(ptr);
-                ptr = bx.next.get_mut().map_or(std::ptr::null_mut(), |p| p.as_ptr());
+                ptr = bx
+                    .next
+                    .get_mut()
+                    .map_or(std::ptr::null_mut(), |p| p.as_ptr());
                 drop(bx)
             }
         }
     }
 }
 
-impl<T> std::ops::Index<usize> for AppendVec<T>
-{
+impl<T> std::ops::Index<usize> for AppendVec<T> {
     type Output = T;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -272,8 +281,7 @@ impl<T> std::ops::Index<usize> for AppendVec<T>
     }
 }
 
-impl<T> std::ops::Index<Idx> for AppendVec<T>
-{
+impl<T> std::ops::Index<Idx> for AppendVec<T> {
     type Output = T;
 
     fn index(&self, index: Idx) -> &Self::Output {
@@ -281,9 +289,7 @@ impl<T> std::ops::Index<Idx> for AppendVec<T>
     }
 }
 
-
-impl<T> std::ops::Index<TPtr<T>> for AppendVec<T>
-{
+impl<T> std::ops::Index<TPtr<T>> for AppendVec<T> {
     type Output = T;
 
     fn index(&self, index: TPtr<T>) -> &Self::Output {

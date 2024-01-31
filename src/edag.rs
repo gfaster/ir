@@ -1,18 +1,29 @@
 //! DAG made for holding instructions: can be safely modified with a shared reference
 
-use std::{num::NonZeroUsize, cell::{RefCell, UnsafeCell, Cell}, sync::atomic::AtomicPtr, mem::{MaybeUninit, ManuallyDrop}, ptr, borrow::BorrowMut, collections::VecDeque};
+use std::{
+    borrow::BorrowMut,
+    cell::{Cell, RefCell, UnsafeCell},
+    collections::VecDeque,
+    mem::{ManuallyDrop, MaybeUninit},
+    num::NonZeroUsize,
+    ptr,
+    sync::atomic::AtomicPtr,
+};
 
-use crate::{vec_map::VecSet, appendvec::{Idx, AppendVec}};
+use crate::{
+    appendvec::{AppendVec, Idx},
+    vec_map::VecSet,
+};
 
 /// append only connected DAG that is modifiable through shared references.
-/// 
+///
 /// There is a lot of room for algorithmic optimization: I expect this to get somewhat slow on
 /// larger graphs due to traversal time of [`AppendVec`]. That will be fixed by either twiddling
 /// with virtual memory or by replacing the index in [`DagRef`] with a pointer, or both.
-pub struct Dag<T> { 
+pub struct Dag<T> {
     // nodes: AppendVec<Option<T>>,
     nodes: AppendVec<DagNode<T>>,
-    root: Cell<Idx>
+    root: Cell<Idx>,
 }
 
 struct DagNode<T> {
@@ -23,7 +34,7 @@ struct DagNode<T> {
 
 pub struct DagRef<'a, T> {
     dag: &'a Dag<T>,
-    idx: Idx
+    idx: Idx,
 }
 impl<T> Clone for DagRef<'_, T> {
     fn clone(&self) -> Self {
@@ -39,15 +50,17 @@ impl<T> std::ops::Deref for DagRef<'_, T> {
         // Safety:
         // will only ever have exclusive reference from `IntoIter`, which cannot lend out
         // references
-        unsafe {
-            &*self.dag.nodes[self.idx.idx()].item.get()
-        }
+        unsafe { &*self.dag.nodes[self.idx.idx()].item.get() }
     }
 }
 
 impl<T> DagNode<T> {
     fn just_add_parent(&self, parent: Idx) {
-        self.parents.iter().find(|i| i.get().is_none()).expect("only two parents are allowed").set(Some(parent));
+        self.parents
+            .iter()
+            .find(|i| i.get().is_none())
+            .expect("only two parents are allowed")
+            .set(Some(parent));
     }
     fn just_add_child(&self, child: Idx) {
         self.children.borrow_mut().insert(child);
@@ -60,10 +73,7 @@ impl<'a, T> DagRef<'a, T> {
     }
 
     fn mk_idx(self, idx: Idx) -> Self {
-        Self {
-            dag: self.dag,
-            idx,
-        }
+        Self { dag: self.dag, idx }
     }
 
     fn to_idx(self) -> DagIdx {
@@ -77,7 +87,9 @@ impl<'a, T> DagRef<'a, T> {
 
     pub fn parents(self) -> impl Iterator<Item = Self> {
         let ret = self.node().parents.clone();
-        ret.into_iter().filter_map(|o| o.take()).map((move |idx| self.mk_idx(idx)))
+        ret.into_iter()
+            .filter_map(|o| o.take())
+            .map((move |idx| self.mk_idx(idx)))
     }
 
     pub fn add_child(self, child: Self) -> Self {
@@ -109,7 +121,10 @@ impl<'a, T> DagRef<'a, T> {
         let node = self.node();
         for parent in &node.parents {
             if let Some(parent_child) = parent.take() {
-                self.dag.nodes[parent_child].children.borrow_mut().remove(&self.idx);
+                self.dag.nodes[parent_child]
+                    .children
+                    .borrow_mut()
+                    .remove(&self.idx);
             }
         }
     }
@@ -122,7 +137,11 @@ impl<'a, T> DagRef<'a, T> {
     pub fn detach_children(self) {
         let node = self.node();
         for child in std::mem::take(&mut *node.children.borrow_mut()) {
-            self.dag.nodes[child].parents.iter().find(|o| o.get() == Some(self.idx)).map(|p| p.take());
+            self.dag.nodes[child]
+                .parents
+                .iter()
+                .find(|o| o.get() == Some(self.idx))
+                .map(|p| p.take());
         }
     }
 
@@ -130,11 +149,18 @@ impl<'a, T> DagRef<'a, T> {
         let node = self.node();
         for parent in &node.parents {
             if let Some(parent_child) = parent.take() {
-                self.dag.nodes[parent_child].children.borrow_mut().remove(&self.idx);
+                self.dag.nodes[parent_child]
+                    .children
+                    .borrow_mut()
+                    .remove(&self.idx);
             }
         }
         for child in std::mem::take(&mut *node.children.borrow_mut()) {
-            self.dag.nodes[child].parents.iter().find(|o| o.get() == Some(self.idx)).map(|p| p.take());
+            self.dag.nodes[child]
+                .parents
+                .iter()
+                .find(|o| o.get() == Some(self.idx))
+                .map(|p| p.take());
         }
     }
 
@@ -150,7 +176,11 @@ impl<'a, T> DagRef<'a, T> {
             }
         }
         for child in std::mem::take(&mut *node.children.borrow_mut()) {
-            self.dag.nodes[child].parents.iter().find(|o| o.get() == Some(self.idx)).map(|p| p.set(Some(item.idx)));
+            self.dag.nodes[child]
+                .parents
+                .iter()
+                .find(|o| o.get() == Some(self.idx))
+                .map(|p| p.set(Some(item.idx)));
             item_node.just_add_child(child)
         }
     }
@@ -160,25 +190,31 @@ impl<T> Dag<T> {
     pub fn new(root: T) -> Self {
         let nodes = AppendVec::new();
         let item = ManuallyDrop::new(root).into();
-        let idx = nodes.append(DagNode { item, parents: std::array::from_fn(|_| None.into()),
-            children: RefCell::new(VecSet::new()) });
+        let idx = nodes.append(DagNode {
+            item,
+            parents: std::array::from_fn(|_| None.into()),
+            children: RefCell::new(VecSet::new()),
+        });
         let root = Idx::new(idx).into();
-        Self {
-            nodes,
-            root
-        }
+        Self { nodes, root }
     }
 
     pub fn get_root(&self) -> DagRef<T> {
-        DagRef { dag: self, idx: self.root.get() }
+        DagRef {
+            dag: self,
+            idx: self.root.get(),
+        }
     }
 
     /// push an item onto the DAG. Note that if the node is not connected to the rest of the DAG,
-    /// then it will not be emitted when made into a topological sort 
+    /// then it will not be emitted when made into a topological sort
     pub fn push(&self, item: T) -> DagRef<T> {
         let item = ManuallyDrop::new(item).into();
-        let idx = self.nodes.append(DagNode { item, parents: std::array::from_fn(|_| None.into()),
-            children: RefCell::new(VecSet::new()) });
+        let idx = self.nodes.append(DagNode {
+            item,
+            parents: std::array::from_fn(|_| None.into()),
+            children: RefCell::new(VecSet::new()),
+        });
         let idx: Idx = Idx::new(idx);
         DagRef { dag: self, idx }
     }
@@ -242,7 +278,7 @@ impl<T> Drop for Dag<T> {
 pub struct DagIntoIter<T> {
     origin: Dag<T>,
     sent: Vec<bool>,
-    queue: VecDeque<Idx>
+    queue: VecDeque<Idx>,
 }
 
 impl<T> Iterator for DagIntoIter<T> {
@@ -253,10 +289,15 @@ impl<T> Iterator for DagIntoIter<T> {
             let idx = loop {
                 let first = self.queue.pop_front()?;
                 if self.sent[first] {
-                    continue
+                    continue;
                 };
                 let mut next = Some(first);
-                for parent in self.origin.get_ref(first).parents().filter(|p| !self.sent[p.idx]) {
+                for parent in self
+                    .origin
+                    .get_ref(first)
+                    .parents()
+                    .filter(|p| !self.sent[p.idx])
+                {
                     if let Some(next) = next.take() {
                         self.queue.push_front(next);
                     }
@@ -272,7 +313,9 @@ impl<T> Iterator for DagIntoIter<T> {
                 }
             }
             self.sent[idx.idx()] = true;
-            Some(ManuallyDrop::take(&mut *self.origin.nodes[idx.idx()].item.get()))
+            Some(ManuallyDrop::take(
+                &mut *self.origin.nodes[idx.idx()].item.get(),
+            ))
         }
     }
 }
@@ -282,7 +325,12 @@ impl<T> Drop for DagIntoIter<T> {
         // Safety:
         // we only take the items we sent
         unsafe {
-            for (idx, item) in self.sent.iter().zip(self.origin.nodes.iter()).filter(|(sent, _)| !*sent) {
+            for (idx, item) in self
+                .sent
+                .iter()
+                .zip(self.origin.nodes.iter())
+                .filter(|(sent, _)| !*sent)
+            {
                 ManuallyDrop::drop(&mut *item.item.get())
             }
         }
@@ -292,39 +340,42 @@ impl<T> Drop for DagIntoIter<T> {
 pub struct DagIter<'a, T> {
     origin: &'a Dag<T>,
     sent: Vec<bool>,
-    queue: VecDeque<Idx>
+    queue: VecDeque<Idx>,
 }
 
 impl<'a, T> Iterator for DagIter<'a, T> {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
-            let idx = loop {
-                let first = self.queue.pop_front()?;
-                if self.sent[first] {
-                    continue
-                };
-                let mut next = Some(first);
-                for parent in self.origin.get_ref(first).parents().filter(|p| !self.sent[p.idx]) {
-                    if let Some(next) = next.take() {
-                        self.queue.push_front(next);
-                    }
-                    self.queue.push_front(parent.idx);
-                }
-                if let Some(next) = next {
-                    break next;
-                }
+        let idx = loop {
+            let first = self.queue.pop_front()?;
+            if self.sent[first] {
+                continue;
             };
-            for child in self.origin.get_ref(idx).children() {
-                if !self.sent[child.idx] {
-                    self.queue.push_back(child.idx)
+            let mut next = Some(first);
+            for parent in self
+                .origin
+                .get_ref(first)
+                .parents()
+                .filter(|p| !self.sent[p.idx])
+            {
+                if let Some(next) = next.take() {
+                    self.queue.push_front(next);
                 }
+                self.queue.push_front(parent.idx);
             }
-            self.sent[idx.idx()] = true;
+            if let Some(next) = next {
+                break next;
+            }
+        };
+        for child in self.origin.get_ref(idx).children() {
+            if !self.sent[child.idx] {
+                self.queue.push_back(child.idx)
+            }
+        }
+        self.sent[idx.idx()] = true;
         // Safety:
         // item is never mutably accessed until origin is dropped
-        unsafe {
-            Some(&*self.origin.nodes[idx.idx()].item.get())
-        }
+        unsafe { Some(&*self.origin.nodes[idx.idx()].item.get()) }
     }
 }

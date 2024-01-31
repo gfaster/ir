@@ -1,4 +1,7 @@
-use std::{borrow::Borrow, ops::{IndexMut, Index}};
+use std::{
+    borrow::Borrow,
+    ops::{Index, IndexMut},
+};
 
 #[derive(Default)]
 pub struct VecMap<K, V> {
@@ -8,55 +11,63 @@ pub struct VecMap<K, V> {
 
 impl<K, V> VecMap<K, V> {
     pub const fn new() -> Self {
-        VecMap { keys: Vec::new(), vals: Vec::new() }
+        VecMap {
+            keys: Vec::new(),
+            vals: Vec::new(),
+        }
     }
 
     pub fn len(&self) -> usize {
         self.keys.len()
     }
 
-    pub fn get<Q>(&self, key: &Q) -> Option<&V> 
-    where K: Eq + Borrow<Q>,
-    Q: Eq + ?Sized
+    pub fn get<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Eq + Borrow<Q>,
+        Q: Eq + ?Sized,
     {
         let idx = self.keys.iter().position(|k| k.borrow() == key)?;
         Some(&self.vals[idx])
     }
 
-
     /// gets the index of key. Be aware that if an item is removed it the index may be invalidated.
-    pub fn get_index<Q>(&self, key: &Q) -> Option<usize> 
-    where K: Eq + Borrow<Q>,
-    Q: Eq + ?Sized
+    pub fn get_index<Q>(&self, key: &Q) -> Option<usize>
+    where
+        K: Eq + Borrow<Q>,
+        Q: Eq + ?Sized,
     {
         self.keys.iter().position(|k| k.borrow() == key)
     }
 
-    pub fn contains_key<Q>(&self, key: &Q) -> bool 
-    where K: Eq + Borrow<Q>,
-    Q: Eq + ?Sized
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Eq + Borrow<Q>,
+        Q: Eq + ?Sized,
     {
         self.get(key).is_some()
     }
 
-    pub fn get_key_val<Q>(&self, key: &Q) -> Option<(&K, &V)> 
-    where K: Eq + Borrow<Q>,
-    Q: Eq + ?Sized
+    pub fn get_key_val<Q>(&self, key: &Q) -> Option<(&K, &V)>
+    where
+        K: Eq + Borrow<Q>,
+        Q: Eq + ?Sized,
     {
         let idx = self.keys.iter().position(|k| k.borrow() == key)?;
         Some((&self.keys[idx], &self.vals[idx]))
     }
 
-    pub fn get_mut<'a, Q>(&'a mut self, key: &'_ Q) -> Option<&'a mut V> 
-    where K: Eq + Borrow<Q>,
-    Q: Eq + ?Sized
+    pub fn get_mut<'a, Q>(&'a mut self, key: &'_ Q) -> Option<&'a mut V>
+    where
+        K: Eq + Borrow<Q>,
+        Q: Eq + ?Sized,
     {
         let idx = self.keys.iter().position(|k| k.borrow() == key)?;
         Some(&mut self.vals[idx])
     }
 
-    pub fn insert(&mut self, key: K, val: V) -> Option<V> 
-    where K: Eq
+    pub fn insert(&mut self, key: K, val: V) -> Option<V>
+    where
+        K: Eq,
     {
         if let Some(idx) = self.keys.iter().position(|k| k == &key) {
             let ret = std::mem::replace(&mut self.vals[idx], val);
@@ -68,9 +79,10 @@ impl<K, V> VecMap<K, V> {
         }
     }
 
-    pub fn remove<Q>(&mut self, key: &Q) -> Option<V> 
-    where K: Eq + Borrow<Q>,
-    Q: Eq + ?Sized
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        K: Eq + Borrow<Q>,
+        Q: Eq + ?Sized,
     {
         let idx = self.keys.iter().position(|k| k.borrow() == key)?;
         self.keys.swap_remove(idx);
@@ -99,8 +111,9 @@ impl<K: Eq, V> Extend<(K, V)> for VecMap<K, V> {
 }
 
 impl<K, V, Q> std::ops::Index<&Q> for VecMap<K, V>
-    where Q: Eq + ?Sized,
-K: Eq + Borrow<Q>
+where
+    Q: Eq + ?Sized,
+    K: Eq + Borrow<Q>,
 {
     type Output = V;
 
@@ -110,8 +123,9 @@ K: Eq + Borrow<Q>
 }
 
 impl<K, V, Q> std::ops::IndexMut<&Q> for VecMap<K, V>
-    where Q: Eq + ?Sized,
-K: Eq + Borrow<Q>
+where
+    Q: Eq + ?Sized,
+    K: Eq + Borrow<Q>,
 {
     fn index_mut(&mut self, index: &Q) -> &mut Self::Output {
         self.get_mut(index).expect("key does not exist")
@@ -183,7 +197,8 @@ impl<K> VecSet<K> {
     }
 
     pub fn insert(&mut self, key: K) -> bool
-    where K: Eq
+    where
+        K: Eq,
     {
         if self.0.contains(&key) {
             false
@@ -193,16 +208,18 @@ impl<K> VecSet<K> {
         }
     }
 
-    pub fn contains<Q>(& self, key: &Q) -> bool 
-    where K: Eq + Borrow<Q>,
-    Q: Eq + ?Sized
+    pub fn contains<Q>(&self, key: &Q) -> bool
+    where
+        K: Eq + Borrow<Q>,
+        Q: Eq + ?Sized,
     {
         self.0.iter().find(|&x| x.borrow() == key).is_some()
     }
 
-    pub fn remove<Q>(&mut self, key: &Q) -> bool 
-    where K: Eq + Borrow<Q>,
-    Q: Eq + ?Sized
+    pub fn remove<Q>(&mut self, key: &Q) -> bool
+    where
+        K: Eq + Borrow<Q>,
+        Q: Eq + ?Sized,
     {
         if let Some(idx) = self.0.iter().position(|x| x.borrow() == key) {
             self.0.swap_remove(idx);

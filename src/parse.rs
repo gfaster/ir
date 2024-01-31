@@ -1,12 +1,22 @@
-use crate::{instr::{Target, ArgList, AllocationType, BindList}, reg::{Binding, Immediate}, attr::BindAttributes, ty::Type};
+use crate::{
+    attr::BindAttributes,
+    instr::{AllocationType, ArgList, BindList, Target},
+    reg::{Binding, Immediate},
+    ty::Type,
+};
 use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet, HashMap},
     ops::Range,
-    rc::Rc, sync::Arc,
+    rc::Rc,
+    sync::Arc,
 };
 
-use crate::{unique_label, GlobalData, InstrArg, Val, VarSet, IdTy, BlockId, instr::{MachineInstruction, InstructionTemplate, OpInner}, ir::instruction_map};
+use crate::{
+    instr::{MachineInstruction, OpInner},
+    ir::instruction_map,
+    unique_label, BlockId, GlobalData, IdTy, InstrArg, Val, VarSet,
+};
 
 use self::rules::{collect_decl_args, Rule};
 
@@ -14,7 +24,6 @@ trait Generator {
     type Item;
     fn next(&mut self) -> Self::Item;
 }
-
 
 // struct BindingGen;
 // impl Generator for BindingGen {
@@ -24,8 +33,10 @@ trait Generator {
 //     }
 // }
 
-impl<I, F> Generator for F 
-    where F: FnMut() -> I {
+impl<I, F> Generator for F
+where
+    F: FnMut() -> I,
+{
     type Item = I;
     fn next(&mut self) -> Self::Item {
         self()
@@ -33,23 +44,29 @@ impl<I, F> Generator for F
 }
 
 struct IdentMap<T, G>
-    where G: Generator<Item = T>
-    { 
-    map: HashMap<Rc<str>, (T, bool)>, 
-    newgen: G
+where
+    G: Generator<Item = T>,
+{
+    map: HashMap<Rc<str>, (T, bool)>,
+    newgen: G,
 }
 
 impl<T, G: Generator<Item = T>> IdentMap<T, G> {
     fn new(g: G) -> Self {
-        Self { map: HashMap::new(), newgen: g }
+        Self {
+            map: HashMap::new(),
+            newgen: g,
+        }
     }
     fn try_lookup(&self, ident: impl AsRef<str>) -> Option<T>
-    where T: Clone
+    where
+        T: Clone,
     {
         self.map.get(ident.as_ref()).map(|(i, _)| i.clone())
     }
     fn lookup(&self, ident: impl AsRef<str>) -> T
-    where T: Clone
+    where
+        T: Clone,
     {
         let Some(ret) = self.map.get(ident.as_ref()) else {
             panic!("identifier {} undeclared", ident.as_ref());
@@ -57,7 +74,8 @@ impl<T, G: Generator<Item = T>> IdentMap<T, G> {
         ret.0.clone()
     }
     fn lookup_or_declare(&mut self, ident: impl AsRef<str>) -> T
-    where T: Clone
+    where
+        T: Clone,
     {
         let name = ident.as_ref().into();
         self.map
@@ -66,8 +84,9 @@ impl<T, G: Generator<Item = T>> IdentMap<T, G> {
             .0
             .clone()
     }
-    fn assign(&mut self, ident: impl AsRef<str>) -> T 
-    where T: Clone
+    fn assign(&mut self, ident: impl AsRef<str>) -> T
+    where
+        T: Clone,
     {
         let name = ident.as_ref().into();
         self.map
@@ -83,7 +102,8 @@ impl<T, G: Generator<Item = T>> IdentMap<T, G> {
             .clone()
     }
     fn assert_all_initialized<A>(&self, globals: &BTreeMap<T, A>)
-    where T: Ord + Eq
+    where
+        T: Ord + Eq,
     {
         for (key, val) in self.map.iter() {
             if !val.1 && !globals.contains_key(&val.0) {
@@ -91,10 +111,14 @@ impl<T, G: Generator<Item = T>> IdentMap<T, G> {
             }
         }
     }
-    fn invert(self) -> BTreeMap<T, Arc<str>> where
-    T: Ord + Eq
+    fn invert(self) -> BTreeMap<T, Arc<str>>
+    where
+        T: Ord + Eq,
     {
-        self.map.into_iter().map(|(k, (v, _init))| (v, (*k).into())).collect()
+        self.map
+            .into_iter()
+            .map(|(k, (v, _init))| (v, (*k).into()))
+            .collect()
     }
 }
 type BindMap = IdentMap<Binding, fn() -> Binding>;
@@ -202,7 +226,7 @@ macro_rules! parse_panic {
 mod rules {
     use std::fmt::{Debug, Display};
 
-    use crate::{Type, ir::instruction_map};
+    use crate::{ir::instruction_map, Type};
 
     type Ob<T> = Option<Box<T>>;
 
@@ -581,7 +605,7 @@ mod rules {
         };
         out.push((reg.0.into(), reg.1));
         while let Some(ArgDeclNodeRem(_, nrem)) = rem {
-            out.push((nrem.0.0.into(), nrem.0.1));
+            out.push((nrem.0 .0.into(), nrem.0 .1));
             rem = nrem.1;
         }
         out
@@ -733,20 +757,23 @@ impl Parser {
     }
 
     fn collect_args_idents(
-        &self, 
-        globals: &mut BTreeMap<Binding, GlobalData>, 
+        &self,
+        globals: &mut BTreeMap<Binding, GlobalData>,
         idents: &mut BindMap,
-        args: rules::ArgList
+        args: rules::ArgList,
     ) -> ArgList {
         rules::collect_args(args)
             .into_iter()
-            .map(|idt| {
-                self.process_arg(idt, globals, idents)
-            })
+            .map(|idt| self.process_arg(idt, globals, idents))
             .collect()
     }
 
-    fn process_arg(&self, a: rules::Arg, globals: &mut BTreeMap<Binding, GlobalData>, idents: &mut BindMap) -> InstrArg {
+    fn process_arg(
+        &self,
+        a: rules::Arg,
+        globals: &mut BTreeMap<Binding, GlobalData>,
+        idents: &mut BindMap,
+    ) -> InstrArg {
         match a {
             rules::Arg::Reg(r) => idents.lookup(r).into(),
             rules::Arg::Literal(rules::Literal::StrLiteral(s)) => {
@@ -759,10 +786,8 @@ impl Parser {
                     },
                 );
                 gid.into()
-            },
-            rules::Arg::Literal(rules::Literal::IntLiteral(i)) => {
-                i.into()
             }
+            rules::Arg::Literal(rules::Literal::IntLiteral(i)) => i.into(),
         }
     }
 
@@ -777,32 +802,29 @@ impl Parser {
             rules::Statement::Assign(rules::AssignStatement(dst, _, src)) => {
                 let loc = idents.assign(dst).try_into().expect("invalid lvalue");
                 match src {
-                    rules::Source::Load(_, ty, _, _, reg) =>                         OpInner::Load {
+                    rules::Source::Load(_, ty, _, _, reg) => OpInner::Load {
                         loc,
                         ptr: idents.lookup_or_declare(reg).into(),
                         attr: BindAttributes::new(ty.into()),
-                    }
-                        ,
+                    },
                     rules::Source::Binary(op, ty, lhs, _, rhs) => {
                         let op1 = self.process_arg(lhs, globals, idents);
                         let op2 = self.process_arg(rhs, globals, idents);
                         InstructionTemplate::from_binary_op(loc, op, ty.into(), op1, op2)
-                            .expect("valid ir instruction").inner
+                            .expect("valid ir instruction")
+                            .inner
                     }
-                    rules::Source::Alloca(_, ty) =>                         OpInner::Alloc {
+                    rules::Source::Alloca(_, ty) => OpInner::Alloc {
                         loc,
                         ty: AllocationType::Stack,
                         attr: BindAttributes::new(ty.into()),
-                    }
-                        ,
+                    },
                     rules::Source::Literal(_, _) => todo!(),
                 }
             }
-            rules::Statement::Label(rules::LabelDef(_, idt, args)) => {
-                OpInner::Block {
-                            id: blocks.assign(idt),
-                            args: Self::collect_decl_args_idents(idents, args),
-                        }
+            rules::Statement::Label(rules::LabelDef(_, idt, args)) => OpInner::Block {
+                id: blocks.assign(idt),
+                args: Self::collect_decl_args_idents(idents, args),
             },
             rules::Statement::Jmp(rules::JmpStmt(_, rules::BranchTarget(_, l, args))) => {
                 OpInner::Jmp {
@@ -839,12 +861,12 @@ impl Parser {
                 dst: idents.lookup(dst).into(),
             },
             rules::Statement::Ret(rules::RetStmt(_, ret)) => OpInner::Return {
-                val: self.process_arg(ret, globals, idents)
+                val: self.process_arg(ret, globals, idents),
             },
         };
         InstructionTemplate {
             inner,
-            dbg_info: None
+            dbg_info: None,
         }
     }
 

@@ -27,7 +27,7 @@ impl StackSlotState {
         match (lhs, rhs) {
             (StackSlotState::Allocated, StackSlotState::Allocated) => StackSlotState::Allocated,
             (StackSlotState::Freed, StackSlotState::Freed) => StackSlotState::Freed,
-            _ => StackSlotState::Unknown
+            _ => StackSlotState::Unknown,
         }
     }
 
@@ -73,25 +73,34 @@ pub struct StackState {
 
 impl StackState {
     pub fn new() -> Self {
-        StackState { frame_size: 0, slots: Vec::new(), slot_map: BTreeMap::new() }
+        StackState {
+            frame_size: 0,
+            slots: Vec::new(),
+            slot_map: BTreeMap::new(),
+        }
     }
 
     pub fn frame_size(&self) -> usize {
         self.frame_size * 8
     }
 
-    /// marks a slot as allocated, expanding the stack frame if needed 
+    /// marks a slot as allocated, expanding the stack frame if needed
     fn mark_pos(&mut self, slot: usize) {
         if self.slots.len() <= slot {
             self.frame_size = slot + 1;
-            self.slots.resize_with(slot + 1, || SlotOccupancy::NeverUsed);
+            self.slots
+                .resize_with(slot + 1, || SlotOccupancy::NeverUsed);
         }
         self.slots[slot] = SlotOccupancy::Allocated;
     }
 
     /// finds a free slot and marks it as allocated, expanding the stack frame if needed
     fn find_free_idx(&mut self) -> usize {
-        let pos = self.slots.iter().position(|s| s.is_free()).unwrap_or(self.slots.len());
+        let pos = self
+            .slots
+            .iter()
+            .position(|s| s.is_free())
+            .unwrap_or(self.slots.len());
         self.mark_pos(pos);
         pos
     }
@@ -99,14 +108,20 @@ impl StackState {
     /// finds a free slot that has never been used and marks it as allocated, expanding the stack
     /// frame if needed
     fn find_never_used_idx(&mut self) -> usize {
-        let pos = self.slots.iter().position(|&s| s == SlotOccupancy::NeverUsed).unwrap_or(self.slots.len());
+        let pos = self
+            .slots
+            .iter()
+            .position(|&s| s == SlotOccupancy::NeverUsed)
+            .unwrap_or(self.slots.len());
         self.mark_pos(pos);
         pos
     }
 
     /// return true if slot has never been used
     fn is_never_used(&self, slot: usize) -> bool {
-        self.slots.get(slot).map_or(true, |&occ| occ == SlotOccupancy::NeverUsed)
+        self.slots
+            .get(slot)
+            .map_or(true, |&occ| occ == SlotOccupancy::NeverUsed)
     }
 
     fn alloc(&mut self, size: usize) -> StackSlotRef {
@@ -146,8 +161,7 @@ impl StackState {
             } else {
                 if !lhs.is_never_used(rslot.idx as usize) && !rslot.state.is_freed() {
                     let idx = lhs.find_never_used_idx() as u32;
-                    lhs.slot_map.insert(key, 
-                        StackSlot { idx, ..rslot });
+                    lhs.slot_map.insert(key, StackSlot { idx, ..rslot });
                 }
             }
         }

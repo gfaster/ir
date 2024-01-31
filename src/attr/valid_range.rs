@@ -1,6 +1,6 @@
 use std::ops::{Bound, RangeBounds};
 
-use crate::{ty::Type, reg::Immediate};
+use crate::{reg::Immediate, ty::Type};
 
 #[derive(Debug, Clone)]
 pub(super) enum KnownVal {
@@ -20,7 +20,6 @@ pub(super) enum KnownVal {
 
     // /// not zero
     // NonZero,
-
     /// inclusive lower bound
     Lower(u64),
 
@@ -63,7 +62,7 @@ impl KnownVal {
         match self {
             KnownVal::Known(k) => *k,
             KnownVal::Lower(l) | KnownVal::Range(l, _) => *l,
-            _ => 0
+            _ => 0,
         }
     }
 
@@ -71,7 +70,7 @@ impl KnownVal {
         match self {
             KnownVal::Known(k) => *k,
             KnownVal::Upper(u) | KnownVal::Range(_, u) => *u,
-            _ => ty.max()
+            _ => ty.max(),
         }
     }
 
@@ -104,12 +103,14 @@ impl KnownVal {
                 Some(b) => Bound::Included(b),
                 None => {
                     *self = KnownVal::Poison;
-                    return
-                },
-            }
+                    return;
+                }
+            },
             Bound::Unbounded => Bound::Unbounded,
         };
-        let Bound::Included(b) = lower_inc else {return};
+        let Bound::Included(b) = lower_inc else {
+            return;
+        };
         *self = match self {
             KnownVal::Unknown => KnownVal::Lower(b),
             KnownVal::Known(v) if *v < b => KnownVal::Poison,
@@ -127,11 +128,15 @@ impl KnownVal {
     /// restricts the upper bound, need to normalize after
     fn restrict_upper_bound(&mut self, ty: Type, bound: Bound<&u64>) {
         let upper_inc = match bound {
-            Bound::Excluded(b) => b.checked_sub(1).map_or(Bound::Unbounded, |b| Bound::Included(b)),
+            Bound::Excluded(b) => b
+                .checked_sub(1)
+                .map_or(Bound::Unbounded, |b| Bound::Included(b)),
             Bound::Included(b) => Bound::Included(*b),
             Bound::Unbounded => Bound::Unbounded,
         };
-        let Bound::Included(b) = upper_inc else {return};
+        let Bound::Included(b) = upper_inc else {
+            return;
+        };
         *self = match self {
             KnownVal::Unknown => KnownVal::Upper(b),
             KnownVal::Known(v) if *v > b => KnownVal::Poison,
@@ -196,29 +201,22 @@ impl KnownVal {
             (KnownVal::Undefined, KnownVal::Undefined) => KnownVal::Undefined,
             (KnownVal::Undefined, _) | (_, KnownVal::Undefined) => KnownVal::Unknown,
             (KnownVal::Poison, _) | (_, KnownVal::Poison) => KnownVal::Poison,
-            (KnownVal::Known(l), KnownVal::Known(r)) => {
-                match f(*l, *r) {
-                    Some(k) => KnownVal::Known(k),
-                    None => KnownVal::Poison,
-                }
+            (KnownVal::Known(l), KnownVal::Known(r)) => match f(*l, *r) {
+                Some(k) => KnownVal::Known(k),
+                None => KnownVal::Poison,
             },
             (_, _) => {
                 let la = lhs.min_val(ty);
                 let lb = rhs.min_val(ty);
                 let ha = lhs.max_val(ty);
                 let hb = rhs.max_val(ty);
-                let vals = [
-                    f(la, lb),
-                    f(la, hb),
-                    f(ha, lb),
-                    f(ha, hb),
-                ];
+                let vals = [f(la, lb), f(la, hb), f(ha, lb), f(ha, hb)];
                 let min = vals.iter().flatten().copied().min().unwrap_or(0);
                 let max = vals.iter().flatten().copied().max().unwrap_or(u64::MAX);
                 let mut ret = Self::new();
                 ret.restrict_bound(ty, min..=max);
                 ret
-            },
+            }
         };
         ret
     }
@@ -230,17 +228,20 @@ impl KnownVal {
     /// `f` must satisfy the following properties:
     /// - returns `None` if the operation causes poison
     /// - *more to be added*
-    pub fn apply_op_conservative(ty: Type, f: impl Fn(u64, u64) -> Option<u64>, lhs: &Self, rhs: &Self) -> Self {
+    pub fn apply_op_conservative(
+        ty: Type,
+        f: impl Fn(u64, u64) -> Option<u64>,
+        lhs: &Self,
+        rhs: &Self,
+    ) -> Self {
         // see: https://llvm.org/devmtg/2020-09/slides/Lee-UndefPoison.pdf
         let ret = match (lhs, rhs) {
             (KnownVal::Undefined, KnownVal::Undefined) => KnownVal::Undefined,
             (KnownVal::Undefined, _) | (_, KnownVal::Undefined) => KnownVal::Unknown,
             (KnownVal::Poison, _) | (_, KnownVal::Poison) => KnownVal::Poison,
-            (KnownVal::Known(l), KnownVal::Known(r)) => {
-                match f(*l, *r) {
-                    Some(k) => KnownVal::Known(k),
-                    None => KnownVal::Poison,
-                }
+            (KnownVal::Known(l), KnownVal::Known(r)) => match f(*l, *r) {
+                Some(k) => KnownVal::Known(k),
+                None => KnownVal::Poison,
             },
             (_, _) => KnownVal::Unknown,
         };

@@ -1,7 +1,17 @@
-use crate::{regstate::PhysRegUse, reg::Immediate};
-use std::{rc::{Rc, Weak}, cell::Cell, fmt::Debug};
+use crate::{reg::Immediate, regstate::PhysRegUse};
+use std::{
+    cell::Cell,
+    fmt::Debug,
+    rc::{Rc, Weak},
+};
 
-use crate::{reg::{InstrArg, MachineReg, BlockId, Binding}, Id, vec_map::{VecMap, VecSet}, Val, attr::BindAttributes, ty::Type};
+use crate::{
+    attr::BindAttributes,
+    reg::{Binding, BlockId, InstrArg, MachineReg},
+    ty::Type,
+    vec_map::{VecMap, VecSet},
+    Id, Val,
+};
 
 /// Properties of a instruction. Note that equality is only checked by pointer, which should be
 /// fine since they should only ever be defined as constants.
@@ -23,7 +33,7 @@ pub struct MachineInstrProp {
     /// // r1 = add r1, r2
     /// ```
     /// This is represented as a 3-operand instruction, but the destination operand and the first
-    /// source operand are in the same register. In this case, `op_eq_constraints` would be 
+    /// source operand are in the same register. In this case, `op_eq_constraints` would be
     /// `&[0, 0, 1]`.
     pub op_eq_constraints: &'static [u8],
 }
@@ -58,11 +68,10 @@ impl BasicInstrProp {
     }
 }
 
-
 pub enum ArgCnt {
     Unknown,
     Variable,
-    Known(u8)
+    Known(u8),
 }
 
 #[derive(Debug)]
@@ -127,7 +136,7 @@ pub struct BasicInstrProp {
     pub operand_relative_type_constraints: &'static [u8],
 
     /// simulation of the instruction. Should be none if there are side effects.
-    pub simulation: Option<fn(u64, u64) -> Option<u64>>
+    pub simulation: Option<fn(u64, u64) -> Option<u64>>,
 }
 
 impl std::cmp::PartialEq for BasicInstrProp {
@@ -219,7 +228,8 @@ impl std::ops::Index<usize> for ArgList {
             Self::Binary(_, op2) if index == 1 => Some(op2),
             Self::Many(v) => v.get(index),
             _ => None,
-        }.expect("index is out of bounds")
+        }
+        .expect("index is out of bounds")
     }
 }
 
@@ -239,7 +249,7 @@ impl<const L: usize> From<[InstrArg; L]> for ArgList {
             0 => Self::None,
             1 => Self::Unary(value[0]),
             2 => Self::Binary(value[0], value[1]),
-            _ => Self::Many(Vec::from(value))
+            _ => Self::Many(Vec::from(value)),
         }
     }
 }
@@ -274,7 +284,7 @@ impl<'a> IntoIterator for &'a ArgList {
     }
 }
 
-pub struct ArgListIter<'a>{
+pub struct ArgListIter<'a> {
     list: &'a ArgList,
     idx: usize,
 }
@@ -356,7 +366,6 @@ impl std::fmt::Display for BindList {
     }
 }
 
-
 impl<'a> From<&'a [Binding]> for BindList {
     fn from(value: &'a [Binding]) -> Self {
         let mut ret = Self::new();
@@ -373,7 +382,7 @@ impl<const L: usize> From<[Binding; L]> for BindList {
             0 => Self::None,
             1 => Self::Unary(value[0]),
             2 => Self::Binary(value[0], value[1]),
-            _ => Self::Many(Vec::from(value))
+            _ => Self::Many(Vec::from(value)),
         }
     }
 }
@@ -408,7 +417,7 @@ impl<'a> IntoIterator for &'a BindList {
     }
 }
 
-pub struct BindListIter<'a>{
+pub struct BindListIter<'a> {
     list: &'a BindList,
     idx: usize,
 }
@@ -423,10 +432,8 @@ impl<'a> Iterator for BindListIter<'a> {
     }
 }
 
-
 #[derive(Debug, Clone, Copy)]
-pub struct DebugInfo {
-}
+pub struct DebugInfo {}
 
 #[derive(Clone)]
 pub struct MachineInstruction {
@@ -444,15 +451,21 @@ impl MachineInstruction {
     }
 
     pub fn phys_reg_use(&self, mach: MachineReg) -> Option<PhysRegUse> {
-        self.phys_reg_use_iter().find(|(m, _)| *m == mach).map(|(m, u)| u)
+        self.phys_reg_use_iter()
+            .find(|(m, _)| *m == mach)
+            .map(|(m, u)| u)
     }
 
     pub fn phys_reg_use_iter(&self) -> impl Iterator<Item = (MachineReg, PhysRegUse)> + '_ {
-        self.op_use_iter().chain(self.implicit_op_use_iter()).filter_map(|(b, u)| b.as_machine().map(|b| (b, u)))
+        self.op_use_iter()
+            .chain(self.implicit_op_use_iter())
+            .filter_map(|(b, u)| b.as_machine().map(|b| (b, u)))
     }
 
     fn op_use_iter(&self) -> impl Iterator<Item = (Binding, PhysRegUse)> + '_ {
-        self.operands.bindings().zip(self.props.operand_use.iter().copied())
+        self.operands
+            .bindings()
+            .zip(self.props.operand_use.iter().copied())
     }
 
     fn implicit_op_use_iter(&self) -> impl Iterator<Item = (Binding, PhysRegUse)> + '_ {
@@ -460,11 +473,17 @@ impl MachineInstruction {
     }
 
     pub fn read_registers(&self) -> impl Iterator<Item = Binding> + '_ {
-        self.op_use_iter().chain(self.implicit_op_use_iter()).filter(|(_, u)| u.is_read()).map(|(r, _)| r)
+        self.op_use_iter()
+            .chain(self.implicit_op_use_iter())
+            .filter(|(_, u)| u.is_read())
+            .map(|(r, _)| r)
     }
 
     pub fn def_registers(&self) -> impl Iterator<Item = Binding> + '_ {
-        self.op_use_iter().chain(self.implicit_op_use_iter()).filter(|(_, u)| u.is_defined()).map(|(r, _)| r)
+        self.op_use_iter()
+            .chain(self.implicit_op_use_iter())
+            .filter(|(_, u)| u.is_defined())
+            .map(|(r, _)| r)
     }
 
     pub fn read_phys_regs(&self) -> impl Iterator<Item = MachineReg> + '_ {
@@ -528,49 +547,6 @@ impl InstrId {
     }
 }
 
-/// an [`Instruction`] without the linked-list
-#[derive(Debug, Clone)]
-pub struct InstructionTemplate {
-    pub dbg_info: Option<DebugInfo>,
-    pub inner: OpInner,
-}
-
-impl std::ops::Deref for InstructionTemplate {
-    type Target = OpInner;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl InstructionTemplate {
-    /// for now, all IR instruction are binary operations with one output
-    pub fn from_binary_op(res: Binding, op: impl AsRef<str>, ty: Type, lhs: InstrArg, rhs: InstrArg ) -> Option<Self> {
-        let &prop = crate::ir::instruction_map().get(op.as_ref())?;
-        let args: ArgList = [lhs, rhs].into();
-        Some(InstructionTemplate {
-            dbg_info: None,
-            inner: OpInner::IrInstr { 
-                attr: BindAttributes::new(ty),
-                prop,
-                res,
-                args,
-            }
-        })
-    }
-}
-
-impl From<InstructionTemplate> for Instruction {
-    fn from(value: InstructionTemplate) -> Self {
-        Self {
-            // id: InstructionId::new(),
-            dbg_info: value.dbg_info,
-            inner: value.inner,
-        }
-    }
-}
-
-
 #[derive(Debug, Clone)]
 pub struct Instruction {
     /// attributes of defined binding
@@ -581,7 +557,7 @@ pub struct Instruction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllocationType {
     Stack,
-    Heap
+    Heap,
 }
 
 #[derive(Debug, Clone)]
@@ -592,19 +568,13 @@ pub enum OpInner {
         args: ArgList,
     },
     Alloc {
-        attr: BindAttributes,
-        loc: Binding,
-        ty: AllocationType
+        ty: AllocationType,
     },
     /// direct assignment of a literal, or just another binding
     Assign {
-        attr: BindAttributes,
-        loc: Binding,
-        val: Val
+        val: Val,
     },
     Load {
-        attr: BindAttributes,
-        loc: Binding,
         ptr: InstrArg,
     },
     Block {
@@ -617,14 +587,11 @@ pub enum OpInner {
         fail: Target,
     },
     MachInstr {
-        attr: BindAttributes,
         ins: MachineInstruction,
     },
     IrInstr {
-        attr: BindAttributes,
         prop: &'static BasicInstrProp,
         args: ArgList,
-        res: Binding
     },
     Jmp {
         target: Target,
@@ -634,8 +601,8 @@ pub enum OpInner {
         val: InstrArg,
     },
     Return {
-        val: InstrArg
-    }
+        val: InstrArg,
+    },
 }
 
 impl Instruction {
@@ -657,10 +624,10 @@ impl Instruction {
             simulation: None,
         };
         match &self.inner {
-            OpInner::Call { .. } => &BasicInstrProp { 
+            OpInner::Call { .. } => &BasicInstrProp {
                 op_cnt: 1,
                 mnemonic: "call",
-                is_branch: false, // TODO: stop lying
+                is_branch: false,     // TODO: stop lying
                 is_terminator: false, // TODO: stop lying
                 operand_relative_type_constraints: &[0, 1],
                 is_barrier: true,
@@ -701,7 +668,7 @@ impl Instruction {
                 ..TEMPLATE
             },
             OpInner::MachInstr { ins, .. } => &ins.props.basic,
-            OpInner::Jmp { .. } => &BasicInstrProp{
+            OpInner::Jmp { .. } => &BasicInstrProp {
                 op_cnt: 1,
                 res_cnt: 0,
                 mnemonic: "br",
@@ -789,7 +756,11 @@ impl Instruction {
 
     pub fn is_movable(&self) -> bool {
         let props = self.basic_props();
-        !props.has_side_effects && !props.is_block_header && !props.is_branch && !props.is_terminator && !props.is_barrier
+        !props.has_side_effects
+            && !props.is_block_header
+            && !props.is_branch
+            && !props.is_terminator
+            && !props.is_barrier
     }
 
     pub fn has_side_effects(&self) -> bool {
@@ -800,117 +771,37 @@ impl Instruction {
         self.inner.as_block_id()
     }
 
-    pub fn make_assignment(ty: Type, bind: Binding, val: InstrArg) -> Self {
-        Self {
-            dbg_info: None,
-            inner: OpInner::Assign { attr: BindAttributes::new(ty), loc: bind, val: Val::Binding(val) },
-        }
-    }
-
     /// gets the simple case of a constant assignment.
     ///
     /// e.g. `%i = 5`
     pub fn as_const_assignment(&self) -> Option<Immediate> {
-        let OpInner::Assign { val, .. } = self.inner else { return None };
+        let OpInner::Assign { val, .. } = self.inner else {
+            return None;
+        };
         let Val::Binding(val) = val else { return None };
         val.as_imm()
-    }
-
-    pub fn get_def(&self, idx: usize) -> Option<Binding> {
-        if idx != 0 {
-            return None;
-        }
-        match &self.inner {
-            OpInner::Call { id, args } => None,
-            OpInner::Alloc { attr, loc, ty } => Some(*loc),
-            OpInner::Assign { loc, .. } => Some(*loc),
-            OpInner::Load { attr, loc, ptr } => Some(*loc),
-            OpInner::Block { id, args } => Some(id.into()),
-            OpInner::Br { check, success, fail } => None,
-            OpInner::MachInstr { attr, ins } => ins.def_registers().nth(idx),
-            OpInner::IrInstr { attr, prop, args, res } => Some(*res),
-            OpInner::Jmp { target } => None,
-            OpInner::Store { dst, val } => None,
-            OpInner::Return { val } => None,
-        }
-    }
-
-    pub fn defined_bindings(&self) -> impl Iterator<Item = Binding> + '_ {
-        (0..).flat_map(|i| self.get_def(i))
-    }
-
-    /// returns self as a binary expression, if applicable
-    pub fn as_binary(&self) -> Option<(Binding, InstrArg, InstrArg)> {
-        let OpInner::IrInstr {res, args, ..} = &self.inner else { return None };
-        Some((*res, args[0], args[1]))
-    }
-
-    pub fn read_bindings(&self) -> impl Iterator<Item = Binding> + '_ {
-        (0..).flat_map(|i| self.get_arg(i)).flat_map(|a| a.as_binding())
-    }
-
-    /// get the input arg at idx
-    pub fn get_arg(&self, idx: usize) -> Option<InstrArg> {
-        match &self.inner {
-            OpInner::Call { id, args } => None,
-            OpInner::Alloc { attr, loc, ty } => [InstrArg::from(loc)].get(idx).copied(),
-            OpInner::Assign { val, .. } => [val.as_arg()].get(idx).copied(),
-            OpInner::Load { attr, loc, ptr } => [*ptr].get(idx).copied(),
-            OpInner::Block { id, args } => None,
-            OpInner::Br { check, success, fail } if idx == 0 => Some(*check),
-            OpInner::Br { check, success, fail } if idx == 1 => Some(success.id.into()),
-            OpInner::Br { check, success, fail } if idx < 2 + success.args.len() => Some(success.args[idx - 2]),
-            OpInner::Br { check, success, fail } if idx == 2 + success.args.len() => Some(fail.id.into()),
-            OpInner::Br { check, success, fail } => fail.args.get(idx - success.args.len() - 3),
-            OpInner::MachInstr { attr, ins } => ins.op_use_iter().filter(|(_, u)| u.is_read()).map(|(i, _)| i.into()).nth(idx),
-            OpInner::IrInstr { attr, prop, args, res } => args.get(idx),
-            OpInner::Jmp { target } if idx == 0 => Some(target.id.into()),
-            OpInner::Jmp { target } => target.args.get(idx - 1),
-            OpInner::Store { dst, val } => [*dst, *val].get(idx).copied(),
-            OpInner::Return { val } => [*val].get(idx).copied(),
-        }
-    }
-
-    pub fn get_attr(&self) -> Option<&BindAttributes> {
-        match &self.inner {
-            OpInner::Call { .. } => None,
-            OpInner::Alloc { attr, .. } => Some(attr),
-            OpInner::Assign { attr, .. } => Some(attr),
-            OpInner::Load { attr, .. } => Some(attr),
-            OpInner::Block { .. } => None,
-            OpInner::Br { .. } => None,
-            OpInner::MachInstr { attr, .. } => Some(attr),
-            OpInner::IrInstr { attr, .. } => Some(attr),
-            OpInner::Jmp { .. } => None,
-            OpInner::Store { .. } => None,
-            OpInner::Return { .. } => None,
-        }
-    }
-
-    pub fn arg_iter(&self) -> impl Iterator<Item = InstrArg> + '_ {
-        (0..).flat_map(|i| self.get_arg(i))
     }
 
     pub fn jump_dsts(&self) -> impl Iterator<Item = Binding> + '_ {
         let ret: Box<dyn Iterator<Item = Binding>> = match &self.inner {
             OpInner::Jmp { target } => Box::new([target.id].into_iter().map(Into::into)),
-            OpInner::Br { success, fail, ..  } => Box::new([success.id, fail.id].into_iter().map(Into::into)),
-            _ => Box::new([].into_iter())
+            OpInner::Br { success, fail, .. } => {
+                Box::new([success.id, fail.id].into_iter().map(Into::into))
+            }
+            _ => Box::new([].into_iter()),
         };
         ret
     }
 
-    /// whether two instructions (assumed to be adjacent) may be swapped. 
+    /// whether two instructions (assumed to be adjacent) may be swapped.
     ///
     /// Note that this is not necessarily transitive.
     pub fn may_commute(fst: &Self, snd: &Self) -> bool {
-        (!fst.has_side_effects() || !snd.has_side_effects()) &&
-        (!fst.is_block_header() && !snd.is_block_header()) &&
-        (!fst.is_term() && !snd.is_term()) && {
-            todo!("check usedef chain")
-        }
+        (!fst.has_side_effects() || !snd.has_side_effects())
+            && (!fst.is_block_header() && !snd.is_block_header())
+            && (!fst.is_term() && !snd.is_term())
+            && { todo!("check usedef chain") }
     }
-
 }
 
 impl OpInner {
@@ -927,24 +818,6 @@ impl OpInner {
             Some(*id)
         } else {
             None
-        }
-    }
-}
-
-impl std::fmt::Display for Instruction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.inner {
-            OpInner::Call { id, args } => write!(f, "call @{id} ({args})"),
-            OpInner::Alloc { loc, ty, attr } => write!(f, "{loc} = alloca"),
-            OpInner::Assign { loc, val, .. } => write!(f, "{loc} = {val}"),
-            OpInner::Load { loc, ptr, attr } => write!(f, "{loc} = load ptr {ptr}"),
-            OpInner::Block { id, args } => write!(f, "label {id} ({args}):"),
-            OpInner::Br { check, success, fail } => write!(f, "br {check}, {success}, {fail}"),
-            OpInner::MachInstr { ins, attr } => write!(f, "{ins}"),
-            OpInner::IrInstr { prop, args, res, attr } => write!(f, "{res} = {prop} {args}", prop = prop.mnemonic),
-            OpInner::Jmp { target } => write!(f, "br {target}"),
-            OpInner::Store { dst, val } => write!(f, "store {dst}, {val}"),
-            OpInner::Return { val } => write!(f, "ret {val}"),
         }
     }
 }

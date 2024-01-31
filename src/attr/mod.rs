@@ -1,6 +1,13 @@
-use std::{ops::{RangeBounds, Bound}, sync::{Arc, Mutex, MutexGuard}, collections::{BTreeSet, BTreeMap}};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::{Bound, RangeBounds},
+    sync::{Arc, Mutex, MutexGuard},
+};
 
-use crate::{ty::Type, reg::{Binding, Immediate}};
+use crate::{
+    reg::{Binding, Immediate},
+    ty::Type,
+};
 
 mod valid_range;
 use valid_range::KnownVal;
@@ -9,7 +16,7 @@ use valid_range::KnownVal;
 pub struct BindAttributes {
     ty: Type,
     name: Option<Arc<str>>,
-    val: KnownVal
+    val: KnownVal,
 }
 
 impl BindAttributes {
@@ -59,7 +66,12 @@ impl BindAttributes {
     /// `f` must satisfy the following properties:
     /// - returns `None` if the operation causes poison
     /// - *more to be added*
-    pub fn constrain_val_pure(&self, lhs: &Self, rhs: &Self, f: impl Fn(u64, u64) -> Option<u64>) -> Self {
+    pub fn constrain_val_pure(
+        &self,
+        lhs: &Self,
+        rhs: &Self,
+        f: impl Fn(u64, u64) -> Option<u64>,
+    ) -> Self {
         let mut new = self.clone();
         new.val = KnownVal::apply_op_conservative(self.ty, f, &lhs.val, &rhs.val);
         new
@@ -74,7 +86,7 @@ impl BindAttributes {
         self.val.is_val(val)
     }
 
-    /// returns true if it's possible for this to be `val` 
+    /// returns true if it's possible for this to be `val`
     pub fn is_val_possible(&self, val: u64) -> bool {
         self.val.is_val_possible(val)
     }

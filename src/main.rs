@@ -14,27 +14,27 @@ use std::sync::Arc;
 
 // mod assign_lit;
 
-mod cli;
 mod arch;
+mod cli;
 mod instr;
 mod reg;
-use instr::{MachineInstruction, BasicInstrProp, Instruction};
+use instr::{BasicInstrProp, Instruction, MachineInstruction};
 use reg::{Binding, BlockId, InstrArg};
 mod ir;
-mod vec_map;
 mod stack;
+mod vec_map;
 // mod dag;
 mod sig;
 mod ty;
 use ty::Type;
+mod appendvec;
 mod attr;
 mod edag;
 mod fold;
-mod appendvec;
 mod list;
 mod regstate;
-mod value;
 mod tagged_ptr;
+mod value;
 
 mod parse;
 use asm::{AsmOp, OpTarget};
@@ -51,7 +51,6 @@ type Id = usize;
 type VarSet = Rc<BTreeMap<Binding, Arc<str>>>;
 
 type IdTy = usize;
-
 
 #[macro_export]
 macro_rules! warn_once {
@@ -228,8 +227,6 @@ fn new_function_id() -> u32 {
 //         out
 //     }
 // }
-
-
 
 /*
 impl Op {

@@ -1,8 +1,14 @@
 #![allow(non_camel_case_types)]
-use crate::{instr::{MachineInstrProp, BasicInstrProp, ArgCnt}, regstate::PhysRegUse};
+use crate::{
+    instr::{ArgCnt, BasicInstrProp, MachineInstrProp},
+    regstate::PhysRegUse,
+};
 
 pub mod r {
-    use crate::{reg::{MachineReg, RegBank}, arch::RegBankInfo};
+    use crate::{
+        arch::RegBankInfo,
+        reg::{MachineReg, RegBank},
+    };
 
     macro_rules! machine_regs {
         (@decl $($name:ident: $val:literal);*) => {
@@ -45,7 +51,7 @@ pub mod r {
             }
         };
     }
-    machine_regs!{
+    machine_regs! {
         Rax: "rax", 0;
         Rcx: "rcx", 1;
         Rdx: "rdx", 2;
@@ -98,7 +104,7 @@ pub mod r {
         pub const fn can_mov_from(&self) -> bool {
             match self {
                 Self::Eflags => false,
-                _ => true
+                _ => true,
             }
         }
 

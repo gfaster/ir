@@ -1,7 +1,13 @@
-use std::{cell::Cell, ptr::{NonNull, addr_of}, mem::MaybeUninit, iter::FusedIterator, fmt::Debug, default};
+use std::{
+    cell::Cell,
+    default,
+    fmt::Debug,
+    iter::FusedIterator,
+    mem::MaybeUninit,
+    ptr::{addr_of, NonNull},
+};
 
 use crate::{appendvec::AppendVec, tagged_ptr::TPtr};
-
 
 type ListPtr<T> = Option<NonNull<Node<T>>>;
 
@@ -13,7 +19,7 @@ pub struct List<T> {
 fn item_offset<T>() -> usize {
     let dummy = MaybeUninit::<Node<T>>::uninit();
     let base_ptr = dummy.as_ptr();
-    let member_ptr = unsafe{ core::ptr::addr_of!((*base_ptr).item) };
+    let member_ptr = unsafe { core::ptr::addr_of!((*base_ptr).item) };
     member_ptr as usize - base_ptr as usize
 }
 
@@ -21,7 +27,7 @@ fn item_offset<T>() -> usize {
 ///
 /// head and tail sentinels have their next or prev ptr respectively pointing to the start of the
 /// struct. This lets iterators spin on the tail node. Detached nodes have their prev ptr set to
-/// None and the next ptr set to a forward node. 
+/// None and the next ptr set to a forward node.
 struct Node<T> {
     item: MaybeUninit<T>,
     next: Cell<ListPtr<T>>,
@@ -33,8 +39,7 @@ impl<T> Node<T> {
         // eprintln!("Checking if sentinel:\n\t\
         //     next: {:?}\n\tprev: {:?}", self.next.get(), self.prev.get());
         // self.next.get().is_none() || self.prev.get().is_none()
-        self.next.get() == Some(NonNull::from(self)) || 
-        self.prev.get() == Some(NonNull::from(self))
+        self.next.get() == Some(NonNull::from(self)) || self.prev.get() == Some(NonNull::from(self))
     }
 
     fn is_detached(&self) -> bool {
@@ -47,7 +52,11 @@ impl<T> Node<T> {
         let mut node = self;
         while node.is_detached() {
             unsafe {
-                node = node.next.get().expect("next ptr should never be None").as_ref();
+                node = node
+                    .next
+                    .get()
+                    .expect("next ptr should never be None")
+                    .as_ref();
             }
         }
         node
@@ -57,7 +66,11 @@ impl<T> Node<T> {
     fn next_any(&self) -> &Self {
         let node = self.get_forwarding();
         unsafe {
-            &*node.next.get().expect("next ptr should never be None").as_ptr()
+            &*node
+                .next
+                .get()
+                .expect("next ptr should never be None")
+                .as_ptr()
         }
     }
 
@@ -74,7 +87,10 @@ impl<T> Node<T> {
     fn prev_any(&self) -> &Self {
         let node = self.get_forwarding();
         unsafe {
-            node.prev.get().expect("non-detached node should have prev ptr").as_ref()
+            node.prev
+                .get()
+                .expect("non-detached node should have prev ptr")
+                .as_ref()
         }
     }
 
@@ -89,11 +105,14 @@ impl<T> Node<T> {
 
     /// detaches a node from the list, sets the `next` ptr to point to the predecessor
     fn detach(&self) {
-        assert!(!self.is_sentinel(), "sentinel nodes cannot be detached from the list");
+        assert!(
+            !self.is_sentinel(),
+            "sentinel nodes cannot be detached from the list"
+        );
         unsafe {
             let Some(prev) = self.prev.take() else {
                 // if prev is None, then this node has been detached
-                return
+                return;
             };
             let next = self.next.get().expect("next should never be None");
             (*prev.as_ptr()).next.set(Some(next));
@@ -105,7 +124,7 @@ impl<T> Node<T> {
 
 pub struct Ref<'a, T> {
     list: &'a List<T>,
-    node: &'a Node<T>
+    node: &'a Node<T>,
 }
 
 impl<T> Clone for Ref<'_, T> {
@@ -150,13 +169,11 @@ impl<T> List<T> {
     unsafe fn insert_after_node(&self, node: &Node<T>, item: T) -> &Node<T> {
         let node = node.get_forwarding();
         let next = node.next_any();
-        let new = self.data.append_ref(
-            Node { 
-                item: MaybeUninit::new(item), 
-                prev: Some(node.into()).into(),
-                next: Some(next.into()).into(),
-            }
-        );
+        let new = self.data.append_ref(Node {
+            item: MaybeUninit::new(item),
+            prev: Some(node.into()).into(),
+            next: Some(next.into()).into(),
+        });
         node.next.set(Some(new.into()));
         next.prev.set(Some(new.into()));
         new
@@ -213,7 +230,10 @@ impl<'a, T> Ref<'a, T> {
     pub fn insert_after(&self, item: T) -> Self {
         unsafe {
             let node = self.list.insert_after_node(self.node, item);
-            Self { list: self.list, node }
+            Self {
+                list: self.list,
+                node,
+            }
         }
     }
 
@@ -228,12 +248,18 @@ impl<'a, T> Ref<'a, T> {
         unsafe {
             let prev = self.node.prev_any();
             let node = self.list.insert_after_node(prev, item);
-            Self { list: self.list, node }
+            Self {
+                list: self.list,
+                node,
+            }
         }
     }
 
     pub fn make_iter(self) -> NodeIter<'a, T> {
-        NodeIter { list: self.list, node: self.node }
+        NodeIter {
+            list: self.list,
+            node: self.node,
+        }
     }
 }
 
@@ -250,9 +276,7 @@ impl<T> std::ops::Deref for Ref<'_, T> {
         if self.node.is_sentinel() {
             panic!("attempted to deref a sentinel node - this is a bug in list.rs")
         };
-        unsafe {
-            self.node.get_forwarding().item.assume_init_ref()
-        }
+        unsafe { self.node.get_forwarding().item.assume_init_ref() }
     }
 }
 
@@ -273,7 +297,10 @@ impl<'a, T> Iterator for NodeIter<'a, T> {
         self.node = self.node.get_forwarding();
         let node = self.node.next()?;
         self.node = node;
-        Some(Ref { list: self.list, node })
+        Some(Ref {
+            list: self.list,
+            node,
+        })
     }
 }
 
@@ -297,8 +324,9 @@ impl<A> FromIterator<A> for List<A> {
     }
 }
 
-impl<T, I> From<I> for List<T> 
-    where I: IntoIterator<Item = T> 
+impl<T, I> From<I> for List<T>
+where
+    I: IntoIterator<Item = T>,
 {
     fn from(value: I) -> Self {
         value.into_iter().collect()
@@ -369,7 +397,7 @@ impl<T> Ord for ThinRef<T> {
 }
 
 impl<T> ThinRef<T> {
-    /// Promote to a ListRef. 
+    /// Promote to a ListRef.
     ///
     /// Safety:
     /// - `self` must have been created from a list ref
@@ -394,7 +422,7 @@ impl<T> ThinRef<T> {
     }
 
     /// Create a `ThinRef` from a reference to a item in a list.
-    /// 
+    ///
     /// ### Safety:
     /// - `item` is a reference to an item added to a [`List`]
     /// - violating this constraint may cause instant UB

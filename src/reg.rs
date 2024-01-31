@@ -1,16 +1,15 @@
-use std::{rc::Rc, collections::BTreeMap, fmt::Display, sync::Mutex};
+use std::{collections::BTreeMap, fmt::Display, rc::Rc, sync::Mutex};
 
-use crate::{IdTy, vec_map::VecMap, Instruction, ty::Type};
-
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct InstrArg (InstrArgTy);
+use crate::{ty::Type, vec_map::VecMap, IdTy, Instruction};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct MachineArg (MachArgTy);
+pub struct InstrArg(InstrArgTy);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MachineArg(MachArgTy);
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Binding (BindTy);
+pub struct Binding(BindTy);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MachineReg(u16);
@@ -31,8 +30,12 @@ pub struct Immediate(pub usize);
 pub struct BlockId(IdTy);
 
 pub mod bind_names {
-    use super::{Binding, BindTy};
-    use std::{sync::{Mutex, RwLock, Arc}, collections::BTreeMap, fmt::Display};
+    use super::{BindTy, Binding};
+    use std::{
+        collections::BTreeMap,
+        fmt::Display,
+        sync::{Arc, Mutex, RwLock},
+    };
 
     static BIND_NAMES: RwLock<BTreeMap<Binding, Arc<str>>> = RwLock::new(BTreeMap::new());
     pub fn register_binding(bind: Binding, name: impl Into<Arc<str>>) {
@@ -40,17 +43,20 @@ pub mod bind_names {
     }
 
     pub fn register_many<I, T>(bank: I)
-    where 
+    where
         I: IntoIterator<Item = (Binding, T)>,
-        T: Into<Arc<str>>
+        T: Into<Arc<str>>,
     {
-        BIND_NAMES.write().unwrap().extend(bank.into_iter().map(|(k, v)| (k, v.into())))
+        BIND_NAMES
+            .write()
+            .unwrap()
+            .extend(bank.into_iter().map(|(k, v)| (k, v.into())))
     }
 
     pub struct BindDisplay(BindDispInner);
     enum BindDispInner {
         Named(Arc<str>),
-        Unknown(Binding)
+        Unknown(Binding),
     }
 
     impl Display for BindDisplay {
@@ -59,16 +65,16 @@ pub mod bind_names {
                 BindDispInner::Named(s) => s.fmt(f),
                 BindDispInner::Unknown(Binding(BindTy::IrBinding(v))) => {
                     write!(f, "{}", v.0)
-                },
+                }
                 BindDispInner::Unknown(Binding(BindTy::Virtual(v))) => {
                     write!(f, "{}", v.0)
-                },
+                }
                 BindDispInner::Unknown(Binding(BindTy::Machine(m))) => {
                     write!(f, "{m}")
-                },
+                }
                 BindDispInner::Unknown(Binding(BindTy::Block(b))) => {
                     write!(f, "{}", b.0)
-                },
+                }
             }
         }
     }
@@ -81,7 +87,6 @@ pub mod bind_names {
         }
     }
 }
-
 
 impl InstrArg {
     pub fn as_binding(&self) -> Option<Binding> {
@@ -207,40 +212,40 @@ impl RegBank {
 
 impl From<Binding> for InstrArg {
     fn from(v: Binding) -> Self {
-        InstrArg (InstrArgTy::Binding(v))
+        InstrArg(InstrArgTy::Binding(v))
     }
 }
 
 impl From<MachineReg> for InstrArg {
     fn from(v: MachineReg) -> Self {
         let b: Binding = v.into();
-        InstrArg (InstrArgTy::Binding(b))
+        InstrArg(InstrArgTy::Binding(b))
     }
 }
 
 impl From<BlockId> for InstrArg {
     fn from(v: BlockId) -> Self {
         let b: Binding = v.into();
-        InstrArg (InstrArgTy::Binding(b))
+        InstrArg(InstrArgTy::Binding(b))
     }
 }
 
 impl From<IrBinding> for InstrArg {
     fn from(v: IrBinding) -> Self {
         let b: Binding = v.into();
-        InstrArg (InstrArgTy::Binding(b))
+        InstrArg(InstrArgTy::Binding(b))
     }
 }
 
 impl From<Immediate> for InstrArg {
     fn from(v: Immediate) -> Self {
-        InstrArg ( InstrArgTy::Imm(v))
+        InstrArg(InstrArgTy::Imm(v))
     }
 }
 
 impl From<Virtual> for InstrArg {
     fn from(v: Virtual) -> Self {
-        InstrArg ( InstrArgTy::Binding(Binding(BindTy::Virtual(v))))
+        InstrArg(InstrArgTy::Binding(Binding(BindTy::Virtual(v))))
     }
 }
 
@@ -255,43 +260,42 @@ impl From<MachineArg> for InstrArg {
     }
 }
 
-
 impl From<&Binding> for InstrArg {
     fn from(&v: &Binding) -> Self {
-        InstrArg (InstrArgTy::Binding(v))
+        InstrArg(InstrArgTy::Binding(v))
     }
 }
 
 impl From<&MachineReg> for InstrArg {
     fn from(&v: &MachineReg) -> Self {
         let b: Binding = v.into();
-        InstrArg (InstrArgTy::Binding(b))
+        InstrArg(InstrArgTy::Binding(b))
     }
 }
 
 impl From<&BlockId> for InstrArg {
     fn from(&v: &BlockId) -> Self {
         let b: Binding = v.into();
-        InstrArg (InstrArgTy::Binding(b))
+        InstrArg(InstrArgTy::Binding(b))
     }
 }
 
 impl From<&IrBinding> for InstrArg {
     fn from(&v: &IrBinding) -> Self {
         let b: Binding = v.into();
-        InstrArg (InstrArgTy::Binding(b))
+        InstrArg(InstrArgTy::Binding(b))
     }
 }
 
 impl From<&Immediate> for InstrArg {
     fn from(&v: &Immediate) -> Self {
-        InstrArg ( InstrArgTy::Imm(v))
+        InstrArg(InstrArgTy::Imm(v))
     }
 }
 
 impl From<&Virtual> for InstrArg {
     fn from(&v: &Virtual) -> Self {
-        InstrArg ( InstrArgTy::Binding(Binding(BindTy::Virtual(v))))
+        InstrArg(InstrArgTy::Binding(Binding(BindTy::Virtual(v))))
     }
 }
 
@@ -303,31 +307,31 @@ impl From<&MachineArg> for InstrArg {
 
 impl From<Virtual> for Binding {
     fn from(v: Virtual) -> Self {
-        Binding (BindTy::Virtual(v))
+        Binding(BindTy::Virtual(v))
     }
 }
 
 impl From<MachineReg> for Binding {
     fn from(v: MachineReg) -> Self {
-        Binding (BindTy::Machine(v))
+        Binding(BindTy::Machine(v))
     }
 }
 
 impl From<IrBinding> for Binding {
     fn from(v: IrBinding) -> Self {
-        Binding ( BindTy::IrBinding(v))
+        Binding(BindTy::IrBinding(v))
     }
 }
 
 impl From<BlockId> for Binding {
     fn from(v: BlockId) -> Self {
-        Binding ( BindTy::Block(v))
+        Binding(BindTy::Block(v))
     }
 }
 
 impl From<&Virtual> for Binding {
     fn from(&v: &Virtual) -> Self {
-        Binding (BindTy::Virtual(v))
+        Binding(BindTy::Virtual(v))
     }
 }
 
@@ -345,7 +349,7 @@ impl From<&IrBinding> for Binding {
 
 impl From<&BlockId> for Binding {
     fn from(&v: &BlockId) -> Self {
-        Binding ( BindTy::Block(v))
+        Binding(BindTy::Block(v))
     }
 }
 
@@ -393,7 +397,7 @@ enum BindTy {
     Virtual(Virtual),
 
     /// Machine register: corresponds with a machine register (e.g. `rax`)
-    Machine (MachineReg),
+    Machine(MachineReg),
 
     Block(BlockId),
 }
@@ -541,11 +545,11 @@ impl std::fmt::Display for Immediate {
 
 impl BlockId {
     pub fn new() -> BlockId {
-        static LABEL_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        static LABEL_COUNTER: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
         BlockId(LABEL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
     }
 }
-
 
 impl std::fmt::Display for InstrArg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

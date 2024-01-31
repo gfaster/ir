@@ -46,7 +46,6 @@ pub fn assert_valid_cpu() {
 }
 
 impl<T> TPtr<T> {
-
     const LOW_BITS: usize = align_of::<T>().trailing_zeros() as usize;
     const HIGH_BITS: usize = usize::BITS as usize - PTR_BITS;
     const BITS: usize = Self::LOW_BITS + Self::HIGH_BITS;
@@ -70,7 +69,6 @@ impl<T> TPtr<T> {
         }
     }
 
-
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "bmi2")]
     unsafe fn new_fast(tag: PtrTag, ptr: *const T) -> Self {
@@ -92,8 +90,6 @@ impl<T> TPtr<T> {
         let res = masked | low | (high << (PTR_BITS - Self::LOW_BITS));
         Self(res as *const T)
     }
-
-
 
     pub fn tag(self) -> PtrTag {
         if cfg!(target_feature = "bmi2") && cfg!(target_arch = "x86_64") {
@@ -148,7 +144,10 @@ impl<T> Copy for TPtr<T> {}
 
 impl<T> std::fmt::Debug for TPtr<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Tptr").field("tag", &self.tag().0).field("ptr", &self.ptr()).finish()
+        f.debug_struct("Tptr")
+            .field("tag", &self.tag().0)
+            .field("ptr", &self.ptr())
+            .finish()
     }
 }
 
@@ -170,13 +169,15 @@ impl PtrTag {
     pub fn new<T>() -> Self {
         use std::sync::atomic::*;
         let update = || {
-            TAG_SEED.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |seed| {
-                // https://stackoverflow.com/a/3062783/7487237
-                let a: usize = 1103515245;
-                let c = 12345;
-                let m = 1 << 31;
-                Some(a.wrapping_mul(seed).wrapping_add(c) % m)
-            }).expect("always valid")
+            TAG_SEED
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |seed| {
+                    // https://stackoverflow.com/a/3062783/7487237
+                    let a: usize = 1103515245;
+                    let c = 12345;
+                    let m = 1 << 31;
+                    Some(a.wrapping_mul(seed).wrapping_add(c) % m)
+                })
+                .expect("always valid")
         };
         let num = update().reverse_bits();
         let num = num % (1 << TPtr::<T>::BITS);
@@ -207,7 +208,6 @@ mod test {
             assert_eq!(tptr.ptr(), ptr);
         };
     }
-
 
     #[repr(align(1024))]
     struct BigAlign;

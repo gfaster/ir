@@ -2,14 +2,7 @@ use std::{collections::HashMap, sync::OnceLock};
 
 use crate::instr::*;
 
-
-const IR_INSTRUCTIONS: [&'static BasicInstrProp; 5] = [
-    &ADD,
-    &MUL,
-    &LT,
-    &GT,
-    &EQ,
-];
+const IR_INSTRUCTIONS: [&'static BasicInstrProp; 5] = [&ADD, &MUL, &LT, &GT, &EQ];
 
 pub fn instruction_map() -> &'static HashMap<&'static str, &'static BasicInstrProp> {
     static MAP: OnceLock<HashMap<&'static str, &'static BasicInstrProp>> = OnceLock::new();
@@ -55,28 +48,28 @@ const BASE_OP: BasicInstrProp = BasicInstrProp {
     may_write_memory: true,
     is_barrier: false,
     operand_relative_type_constraints: &[0, 0, 0],
-    simulation: None
+    simulation: None,
 };
 
-new_template!{SIMPLE_OP < BASE_OP = {
+new_template! {SIMPLE_OP < BASE_OP = {
     has_side_effects: false,
     may_read_memory: false,
     may_write_memory: false
 }}
 
-new_op!{pub ADD < SIMPLE_OP = {mnemonic: "add", is_commutative: true, simulation: Some(|l, r| Some(l+r))}}
-new_op!{pub MUL < SIMPLE_OP = {mnemonic: "mul", is_commutative: true, simulation: Some(|l, r| Some(l*r))}}
-new_op!{pub SHR < SIMPLE_OP = {mnemonic: "shr", is_commutative: false, simulation: Some(|l, r| Some(l>>r))}}
-new_op!{pub SAR < SIMPLE_OP = {mnemonic: "sar", is_commutative: false}}
-new_op!{pub SHL < SIMPLE_OP = {mnemonic: "shl", is_commutative: false, simulation: Some(|l, r| Some(l<<r))}}
-new_op!{pub AND < SIMPLE_OP = {mnemonic: "and", is_commutative: true, simulation: Some(|l, r| Some(l&r))}}
-new_op!{pub OR  < SIMPLE_OP = {mnemonic: "or",  is_commutative: true, simulation: Some(|l, r| Some(l|r))}}
-new_op!{pub XOR < SIMPLE_OP = {mnemonic: "xor", is_commutative: true, simulation: Some(|l, r| Some(l^r))}}
+new_op! {pub ADD < SIMPLE_OP = {mnemonic: "add", is_commutative: true, simulation: Some(|l, r| Some(l+r))}}
+new_op! {pub MUL < SIMPLE_OP = {mnemonic: "mul", is_commutative: true, simulation: Some(|l, r| Some(l*r))}}
+new_op! {pub SHR < SIMPLE_OP = {mnemonic: "shr", is_commutative: false, simulation: Some(|l, r| Some(l>>r))}}
+new_op! {pub SAR < SIMPLE_OP = {mnemonic: "sar", is_commutative: false}}
+new_op! {pub SHL < SIMPLE_OP = {mnemonic: "shl", is_commutative: false, simulation: Some(|l, r| Some(l<<r))}}
+new_op! {pub AND < SIMPLE_OP = {mnemonic: "and", is_commutative: true, simulation: Some(|l, r| Some(l&r))}}
+new_op! {pub OR  < SIMPLE_OP = {mnemonic: "or",  is_commutative: true, simulation: Some(|l, r| Some(l|r))}}
+new_op! {pub XOR < SIMPLE_OP = {mnemonic: "xor", is_commutative: true, simulation: Some(|l, r| Some(l^r))}}
 
-new_template!{CMP_OP < SIMPLE_OP = {
+new_template! {CMP_OP < SIMPLE_OP = {
     operand_relative_type_constraints: &[0, 1, 1]
 }}
 
-new_op!{pub LT < CMP_OP = {mnemonic: "lt"}}
-new_op!{pub GT < CMP_OP = {mnemonic: "gt"}}
-new_op!{pub EQ < CMP_OP = {mnemonic: "eq", is_commutative: true}}
+new_op! {pub LT < CMP_OP = {mnemonic: "lt"}}
+new_op! {pub GT < CMP_OP = {mnemonic: "gt"}}
+new_op! {pub EQ < CMP_OP = {mnemonic: "eq", is_commutative: true}}

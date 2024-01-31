@@ -2,14 +2,20 @@
 //! produce multiple values, so I need to figure out how to make it play nice. Also, I want to make
 //! it not OOP.
 
-use std::{cell::{RefCell, Ref, RefMut}, ops::{Deref, DerefMut}, ptr::NonNull};
+use std::{
+    cell::{Ref, RefCell, RefMut},
+    ops::{Deref, DerefMut},
+    ptr::NonNull,
+};
 
-use crate::{ty::Type, attr::BindAttributes, reg::Immediate, instr::Instruction};
+use crate::{attr::BindAttributes, instr::Instruction, reg::Immediate, ty::Type};
 
 type OptPtr<T> = Option<NonNull<T>>;
 
+pub struct Function {}
+
 pub struct Value {
-    inner: RefCell<ValueInner>
+    inner: RefCell<ValueInner>,
 }
 
 pub struct ValueInner {
@@ -19,14 +25,14 @@ pub struct ValueInner {
 
 enum ValueType {
     Imm(Immediate),
-    Instr { 
+    Instr {
         instr: Instruction,
-        add_res: OptPtr<Value>
+        add_res: OptPtr<Value>,
     },
-    AdditionalResult { 
+    AdditionalResult {
         origin: *const Value,
-        next: OptPtr<Value>
-    }
+        next: OptPtr<Value>,
+    },
 }
 
 impl ValueInner {
@@ -35,10 +41,10 @@ impl ValueInner {
     }
 }
 
-/* 
+/*
  *  ==============================
  *  boring stuffs
- *  ============================== 
+ *  ==============================
 */
 
 pub struct VRef<'a>(Ref<'a, ValueInner>);
