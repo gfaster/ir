@@ -62,7 +62,7 @@ impl<T> TPtr<T> {
         debug_assert!(tag.0.leading_zeros() as usize >= usize::BITS as usize - Self::BITS);
         debug_assert!(tag.0.leading_zeros() >= Self::MASK.count_ones());
 
-        if cfg!(target_feature = "bmi2") && cfg!(target_arch = "x86_64") {
+        if cfg!(target_feature = "bmi2") && cfg!(target_arch = "x86_64") && !cfg!(miri) {
             unsafe { Self::new_fast(tag, ptr) }
         } else {
             Self::new_fallback(tag, ptr)
@@ -92,7 +92,7 @@ impl<T> TPtr<T> {
     }
 
     pub fn tag(self) -> PtrTag {
-        if cfg!(target_feature = "bmi2") && cfg!(target_arch = "x86_64") {
+        if cfg!(target_feature = "bmi2") && cfg!(target_arch = "x86_64") && !cfg!(miri) {
             unsafe { self.tag_fast() }
         } else {
             self.tag_fallback()
@@ -131,6 +131,12 @@ impl<T> TPtr<T> {
 
     pub fn destructure(self) -> (PtrTag, *const T) {
         (self.tag(), self.ptr())
+    }
+}
+
+impl<T> std::hash::Hash for TPtr<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::ptr::hash(self.0, state)
     }
 }
 

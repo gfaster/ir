@@ -1,4 +1,8 @@
-use crate::{reg::Immediate, regstate::PhysRegUse};
+use crate::{
+    reg::Immediate,
+    regstate::PhysRegUse,
+    value::{Function, ValueHandle},
+};
 use std::{
     cell::Cell,
     fmt::Debug,
@@ -147,14 +151,14 @@ impl std::cmp::PartialEq for BasicInstrProp {
 impl std::cmp::Eq for BasicInstrProp {}
 
 #[derive(Clone, PartialEq, Eq)]
-pub enum ArgList {
+pub enum ValueList {
     None,
-    Unary(InstrArg),
-    Binary(InstrArg, InstrArg),
-    Many(Vec<InstrArg>),
+    Unary(ValueHandle),
+    Binary(ValueHandle, ValueHandle),
+    Many(Vec<ValueHandle>),
 }
 
-impl ArgList {
+impl ValueList {
     fn new() -> Self {
         Self::None
     }
@@ -172,7 +176,7 @@ impl ArgList {
         self.len() == 0
     }
     #[must_use]
-    fn get(&self, idx: usize) -> Option<InstrArg> {
+    fn get(&self, idx: usize) -> Option<ValueHandle> {
         match self {
             Self::None => None,
             Self::Unary(op1) => [*op1].get(idx).copied(),
@@ -180,7 +184,7 @@ impl ArgList {
             Self::Many(v) => v.get(idx).copied(),
         }
     }
-    fn push(&mut self, bind: InstrArg) {
+    fn push(&mut self, bind: ValueHandle) {
         match self {
             Self::None => *self = Self::Unary(bind),
             Self::Unary(op1) => *self = Self::Binary(*op1, bind),
@@ -192,23 +196,19 @@ impl ArgList {
     fn iter(&self) -> ArgListIter {
         ArgListIter { list: self, idx: 0 }
     }
-
-    fn bindings(&self) -> impl Iterator<Item = Binding> + '_ {
-        self.iter().filter_map(|a| a.as_binding())
-    }
 }
 
-impl Debug for ArgList {
+impl Debug for ValueList {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_list().entries(self.iter()).finish()
     }
 }
 
-impl std::fmt::Display for ArgList {
+impl std::fmt::Display for ValueList {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut it = self.iter().peekable();
         while let Some(next) = it.next() {
-            write!(f, "{next}")?;
+            write!(f, "{next:?}")?;
             if it.peek().is_some() {
                 write!(f, ", ")?;
             }
@@ -217,8 +217,8 @@ impl std::fmt::Display for ArgList {
     }
 }
 
-impl std::ops::Index<usize> for ArgList {
-    type Output = InstrArg;
+impl std::ops::Index<usize> for ValueList {
+    type Output = ValueHandle;
 
     fn index(&self, index: usize) -> &Self::Output {
         match self {
@@ -233,8 +233,8 @@ impl std::ops::Index<usize> for ArgList {
     }
 }
 
-impl<'a> From<&'a [InstrArg]> for ArgList {
-    fn from(value: &'a [InstrArg]) -> Self {
+impl<'a> From<&'a [ValueHandle]> for ValueList {
+    fn from(value: &'a [ValueHandle]) -> Self {
         let mut ret = Self::new();
         for x in value {
             ret.push(*x);
@@ -243,8 +243,8 @@ impl<'a> From<&'a [InstrArg]> for ArgList {
     }
 }
 
-impl<const L: usize> From<[InstrArg; L]> for ArgList {
-    fn from(value: [InstrArg; L]) -> Self {
+impl<const L: usize> From<[ValueHandle; L]> for ValueList {
+    fn from(value: [ValueHandle; L]) -> Self {
         match value.len() {
             0 => Self::None,
             1 => Self::Unary(value[0]),
@@ -254,8 +254,8 @@ impl<const L: usize> From<[InstrArg; L]> for ArgList {
     }
 }
 
-impl FromIterator<InstrArg> for ArgList {
-    fn from_iter<T: IntoIterator<Item = InstrArg>>(iter: T) -> Self {
+impl FromIterator<ValueHandle> for ValueList {
+    fn from_iter<T: IntoIterator<Item = ValueHandle>>(iter: T) -> Self {
         let mut ret = Self::new();
         for item in iter {
             ret.push(item)
@@ -264,8 +264,8 @@ impl FromIterator<InstrArg> for ArgList {
     }
 }
 
-impl<'a> FromIterator<&'a InstrArg> for ArgList {
-    fn from_iter<T: IntoIterator<Item = &'a InstrArg>>(iter: T) -> Self {
+impl<'a> FromIterator<&'a ValueHandle> for ValueList {
+    fn from_iter<T: IntoIterator<Item = &'a ValueHandle>>(iter: T) -> Self {
         let mut ret = Self::new();
         for &item in iter {
             ret.push(item)
@@ -274,8 +274,8 @@ impl<'a> FromIterator<&'a InstrArg> for ArgList {
     }
 }
 
-impl<'a> IntoIterator for &'a ArgList {
-    type Item = InstrArg;
+impl<'a> IntoIterator for &'a ValueList {
+    type Item = ValueHandle;
 
     type IntoIter = ArgListIter<'a>;
 
@@ -285,12 +285,12 @@ impl<'a> IntoIterator for &'a ArgList {
 }
 
 pub struct ArgListIter<'a> {
-    list: &'a ArgList,
+    list: &'a ValueList,
     idx: usize,
 }
 
 impl<'a> Iterator for ArgListIter<'a> {
-    type Item = InstrArg;
+    type Item = ValueHandle;
 
     fn next(&mut self) -> Option<Self::Item> {
         let ret = self.list.get(self.idx)?;
@@ -439,56 +439,56 @@ pub struct DebugInfo {}
 pub struct MachineInstruction {
     /// the type of instruction this is, and all of its static properties
     props: &'static MachineInstrProp,
-    operands: ArgList,
+    operands: ValueList,
 }
 
 impl MachineInstruction {
     pub fn new(op: &'static MachineInstrProp) -> Self {
         Self {
             props: op,
-            operands: ArgList::new(),
+            operands: ValueList::new(),
         }
     }
 
-    pub fn phys_reg_use(&self, mach: MachineReg) -> Option<PhysRegUse> {
-        self.phys_reg_use_iter()
-            .find(|(m, _)| *m == mach)
-            .map(|(m, u)| u)
-    }
-
-    pub fn phys_reg_use_iter(&self) -> impl Iterator<Item = (MachineReg, PhysRegUse)> + '_ {
-        self.op_use_iter()
-            .chain(self.implicit_op_use_iter())
-            .filter_map(|(b, u)| b.as_machine().map(|b| (b, u)))
-    }
-
-    fn op_use_iter(&self) -> impl Iterator<Item = (Binding, PhysRegUse)> + '_ {
-        self.operands
-            .bindings()
-            .zip(self.props.operand_use.iter().copied())
-    }
-
-    fn implicit_op_use_iter(&self) -> impl Iterator<Item = (Binding, PhysRegUse)> + '_ {
-        self.props.ref_regs.iter().map(|&(r, u)| (r.into(), u))
-    }
-
-    pub fn read_registers(&self) -> impl Iterator<Item = Binding> + '_ {
-        self.op_use_iter()
-            .chain(self.implicit_op_use_iter())
-            .filter(|(_, u)| u.is_read())
-            .map(|(r, _)| r)
-    }
-
-    pub fn def_registers(&self) -> impl Iterator<Item = Binding> + '_ {
-        self.op_use_iter()
-            .chain(self.implicit_op_use_iter())
-            .filter(|(_, u)| u.is_defined())
-            .map(|(r, _)| r)
-    }
-
-    pub fn read_phys_regs(&self) -> impl Iterator<Item = MachineReg> + '_ {
-        self.read_registers().filter_map(|r| r.as_machine())
-    }
+    // pub fn phys_reg_use(&self, mach: MachineReg) -> Option<PhysRegUse> {
+    //     self.phys_reg_use_iter()
+    //         .find(|(m, _)| *m == mach)
+    //         .map(|(m, u)| u)
+    // }
+    //
+    // pub fn phys_reg_use_iter(&self) -> impl Iterator<Item = (MachineReg, PhysRegUse)> + '_ {
+    //     self.op_use_iter()
+    //         .chain(self.implicit_op_use_iter())
+    //         .filter_map(|(b, u)| b.as_machine().map(|b| (b, u)))
+    // }
+    //
+    // fn op_use_iter(&self) -> impl Iterator<Item = (Binding, PhysRegUse)> + '_ {
+    //     self.operands
+    //         .bindings()
+    //         .zip(self.props.operand_use.iter().copied())
+    // }
+    //
+    // fn implicit_op_use_iter(&self) -> impl Iterator<Item = (Binding, PhysRegUse)> + '_ {
+    //     self.props.ref_regs.iter().map(|&(r, u)| (r.into(), u))
+    // }
+    //
+    // pub fn read_registers(&self) -> impl Iterator<Item = Binding> + '_ {
+    //     self.op_use_iter()
+    //         .chain(self.implicit_op_use_iter())
+    //         .filter(|(_, u)| u.is_read())
+    //         .map(|(r, _)| r)
+    // }
+    //
+    // pub fn def_registers(&self) -> impl Iterator<Item = Binding> + '_ {
+    //     self.op_use_iter()
+    //         .chain(self.implicit_op_use_iter())
+    //         .filter(|(_, u)| u.is_defined())
+    //         .map(|(r, _)| r)
+    // }
+    //
+    // pub fn read_phys_regs(&self) -> impl Iterator<Item = MachineReg> + '_ {
+    //     self.read_registers().filter_map(|r| r.as_machine())
+    // }
 }
 
 impl std::fmt::Debug for MachineInstruction {
@@ -499,41 +499,41 @@ impl std::fmt::Debug for MachineInstruction {
 
 impl std::fmt::Display for MachineInstruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut it = self.def_registers().peekable();
-        while let Some(r) = it.next() {
-            write!(f, "%{r}")?;
-            if it.peek().is_some() {
-                write!(f, ", ")?;
-            }
-        }
-        write!(f, " = {} ", self.props.basic.mnemonic)?;
-        let mut it = self.read_registers().peekable();
-        while let Some(r) = it.next() {
-            write!(f, "%{r}")?;
-            if it.peek().is_some() {
-                write!(f, ", ")?;
-            }
-        }
-        Ok(())
+        // let mut it = self.def_registers().peekable();
+        // while let Some(r) = it.next() {
+        //     write!(f, "%{r}")?;
+        //     if it.peek().is_some() {
+        //         write!(f, ", ")?;
+        //     }
+        // }
+        // write!(f, " = {} ", self.props.basic.mnemonic)?;
+        // let mut it = self.read_registers().peekable();
+        // while let Some(r) = it.next() {
+        //     write!(f, "%{r}")?;
+        //     if it.peek().is_some() {
+        //         write!(f, ", ")?;
+        //     }
+        // }
+        write!(f, "Machine reg debug unimplemented")
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Target {
-    pub id: BlockId,
-    pub args: ArgList,
+    pub id: ValueHandle,
+    pub args: ValueList,
 }
 
 impl Target {
-    fn read_registers(&self) -> impl Iterator<Item = Binding> + '_ {
-        std::iter::once(self.id.into()).chain(self.args.bindings())
+    fn read_registers(&self, func: &Function) -> impl Iterator<Item = ValueHandle> + '_ {
+        std::iter::once(self.id.into()).chain(&self.args)
     }
 }
 
 impl std::fmt::Display for Target {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let Self { id, args } = self;
-        write!(f, "label {id} ({args})")
+        write!(f, "{id:?} ({args})")
     }
 }
 
@@ -550,7 +550,6 @@ impl InstrId {
 #[derive(Debug, Clone)]
 pub struct Instruction {
     /// attributes of defined binding
-    dbg_info: Option<DebugInfo>,
     inner: OpInner,
 }
 
@@ -565,24 +564,21 @@ pub enum OpInner {
     /// treated as a binary instruction (target, arguments)
     Call {
         id: Id,
-        args: ArgList,
+        args: ValueList,
     },
     Alloc {
         ty: AllocationType,
     },
     /// direct assignment of a literal, or just another binding
     Assign {
-        val: Val,
+        val: ValueHandle,
     },
     Load {
-        ptr: InstrArg,
+        ptr: ValueHandle,
     },
-    Block {
-        id: BlockId,
-        args: BindList,
-    },
+    Block {},
     Br {
-        check: InstrArg,
+        check: ValueHandle,
         success: Target,
         fail: Target,
     },
@@ -591,17 +587,17 @@ pub enum OpInner {
     },
     IrInstr {
         prop: &'static BasicInstrProp,
-        args: ArgList,
+        args: ValueList,
     },
     Jmp {
         target: Target,
     },
     Store {
-        dst: InstrArg,
-        val: InstrArg,
+        dst: ValueHandle,
+        val: ValueHandle,
     },
     Return {
-        val: InstrArg,
+        val: ValueHandle,
     },
 }
 
@@ -754,6 +750,10 @@ impl Instruction {
         self.basic_props().is_barrier
     }
 
+    pub fn res_cnt(&self) -> u8 {
+        self.basic_props().res_cnt
+    }
+
     pub fn is_movable(&self) -> bool {
         let props = self.basic_props();
         !props.has_side_effects
@@ -767,30 +767,43 @@ impl Instruction {
         self.basic_props().has_side_effects
     }
 
-    pub fn as_block_header_id(&self) -> Option<BlockId> {
-        self.inner.as_block_id()
-    }
-
-    /// gets the simple case of a constant assignment.
-    ///
-    /// e.g. `%i = 5`
-    pub fn as_const_assignment(&self) -> Option<Immediate> {
-        let OpInner::Assign { val, .. } = self.inner else {
-            return None;
-        };
-        let Val::Binding(val) = val else { return None };
-        val.as_imm()
-    }
-
-    pub fn jump_dsts(&self) -> impl Iterator<Item = Binding> + '_ {
-        let ret: Box<dyn Iterator<Item = Binding>> = match &self.inner {
-            OpInner::Jmp { target } => Box::new([target.id].into_iter().map(Into::into)),
-            OpInner::Br { success, fail, .. } => {
-                Box::new([success.id, fail.id].into_iter().map(Into::into))
-            }
+    pub fn jump_dsts(&self) -> impl Iterator<Item = ValueHandle> + '_ {
+        let ret: Box<dyn Iterator<Item = ValueHandle>> = match &self.inner {
+            OpInner::Jmp { target } => Box::new([target.id].into_iter()),
+            OpInner::Br { success, fail, .. } => Box::new([success.id, fail.id].into_iter()),
             _ => Box::new([].into_iter()),
         };
         ret
+    }
+
+    pub fn get_arg_idx(&self, idx: usize) -> Option<ValueHandle> {
+        match &self.inner {
+            OpInner::Call { id, args } => args.get(idx),
+            OpInner::Alloc { ty } => None,
+            OpInner::Assign { val } => unimplemented!(),
+            OpInner::Load { ptr } => [*ptr].get(idx).copied(),
+            OpInner::Block {} => None,
+            OpInner::Br {
+                check,
+                success,
+                fail,
+            } => [*check]
+                .into_iter()
+                .chain([success.id])
+                .chain(success.args.iter())
+                .chain([fail.id])
+                .chain(fail.args.iter())
+                .nth(idx),
+            OpInner::MachInstr { ins } => todo!(),
+            OpInner::IrInstr { prop, args } => args.get(idx),
+            OpInner::Jmp { target } => [target.id].into_iter().chain(target.args.iter()).nth(idx),
+            OpInner::Store { dst, val } => [*dst, *val].get(idx).copied(),
+            OpInner::Return { val } => [*val].get(idx).copied(),
+        }
+    }
+
+    pub fn args_iter(&self) -> impl Iterator<Item = ValueHandle> + '_ {
+        (0..).map_while(|i| self.get_arg_idx(i))
     }
 
     /// whether two instructions (assumed to be adjacent) may be swapped.
@@ -801,6 +814,10 @@ impl Instruction {
             && (!fst.is_block_header() && !snd.is_block_header())
             && (!fst.is_term() && !snd.is_term())
             && { todo!("check usedef chain") }
+    }
+
+    pub fn from_inner(inner: OpInner) -> Instruction {
+        Instruction { inner }
     }
 }
 
@@ -813,11 +830,14 @@ impl OpInner {
         }
     }
 
-    fn as_block_id(&self) -> Option<BlockId> {
-        if let Self::Block { id, .. } = self {
-            Some(*id)
-        } else {
-            None
-        }
+    pub fn from_binary_op(
+        op: impl AsRef<str>,
+        ty: Type,
+        lhs: ValueHandle,
+        rhs: ValueHandle,
+    ) -> Option<Self> {
+        let &prop = crate::ir::instruction_map().get(op.as_ref())?;
+        let args = [lhs, rhs].into();
+        Some(OpInner::IrInstr { prop, args })
     }
 }

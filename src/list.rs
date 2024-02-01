@@ -261,6 +261,14 @@ impl<'a, T> Ref<'a, T> {
             node: self.node,
         }
     }
+
+    /// Take an owned self and get a reference to the held item
+    pub fn into_inner(self) -> &'a T {
+        if self.node.is_sentinel() {
+            panic!("attempted to deref a sentinel node - this is a bug in list.rs")
+        };
+        unsafe { self.node.get_forwarding().item.assume_init_ref() }
+    }
 }
 
 impl<T: Debug> Debug for Ref<'_, T> {
@@ -273,10 +281,7 @@ impl<T> std::ops::Deref for Ref<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        if self.node.is_sentinel() {
-            panic!("attempted to deref a sentinel node - this is a bug in list.rs")
-        };
-        unsafe { self.node.get_forwarding().item.assume_init_ref() }
+        self.into_inner()
     }
 }
 
@@ -353,7 +358,7 @@ impl<T> Drop for List<T> {
 // Not necessarily fused
 // impl<T> FusedIterator for NodeIter<'_, T> {}
 
-/// pointer to a list node. Unsafe to promote.
+/// a tagged pointer to a list node.
 pub struct ThinRef<T>(TPtr<Node<T>>);
 
 impl<T> Clone for ThinRef<T> {
@@ -379,6 +384,12 @@ impl<T> From<Ref<'_, T>> for ThinRef<T> {
 impl<T> PartialEq for ThinRef<T> {
     fn eq(&self, other: &Self) -> bool {
         self.0 == other.0
+    }
+}
+
+impl<T> std::hash::Hash for ThinRef<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state)
     }
 }
 
@@ -414,7 +425,7 @@ impl<T> ThinRef<T> {
         Some(Ref { list, node })
     }
 
-    pub fn promote(self, list: &List<T>) -> Ref<T> {
+    pub fn promote<'a>(self, list: &'a List<T>) -> Ref<'a, T> {
         let Some(lref) = self.try_promote(list) else {
             panic!("ThinRef does not belong to list");
         };

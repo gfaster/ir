@@ -15,8 +15,12 @@ use valid_range::KnownVal;
 #[derive(Debug, Clone)]
 pub struct BindAttributes {
     ty: Type,
-    name: Option<Arc<str>>,
+    name: Arc<str>,
     val: KnownVal,
+}
+
+fn new_name() -> Arc<str> {
+    crate::unique_name().into()
 }
 
 impl BindAttributes {
@@ -24,32 +28,33 @@ impl BindAttributes {
         self.ty
     }
 
-    pub const fn from_imm(ty: Type, imm: Immediate) -> Self {
+    pub fn from_imm(ty: Type, imm: Immediate) -> Self {
         Self {
             ty,
-            name: None,
+            name: new_name(),
             val: KnownVal::from_imm(imm),
         }
     }
 
-    pub const fn new(ty: Type) -> Self {
+    pub fn new(ty: Type) -> Self {
         Self {
             ty,
-            name: None,
+            name: new_name(),
             val: KnownVal::new(),
         }
     }
 
     pub fn with_name(self, name: Arc<str>) -> Self {
-        Self {
-            name: Some(name),
-            ..self
-        }
+        Self { name, ..self }
     }
 
     pub fn set_name(&mut self, name: Arc<str>) -> &mut Self {
-        self.name = Some(name);
+        self.name = name;
         self
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// constrain the known value to the possible results of `f`

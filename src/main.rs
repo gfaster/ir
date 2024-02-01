@@ -82,7 +82,6 @@ impl OperationalValidity {
 
 struct Ctx {
     pub config: Config,
-    pub vars: VarSet,
     pub globals: BTreeMap<Binding, GlobalData>,
 }
 
@@ -136,6 +135,12 @@ impl GlobalData {
         writeln!(out).unwrap();
         out
     }
+}
+
+fn unique_name() -> String {
+    static LABEL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let label = LABEL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("anon.{label}")
 }
 
 fn unique_label() -> String {
@@ -645,18 +650,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input_file = config.input_files.first().map(|s| &**s).unwrap();
 
     let mut input = parse::Parser::new_file(input_file)?;
-    let ParsedFile {
-        routine,
-        vars,
-        globals,
-    } = input.parse();
-    reg::bind_names::register_many((*vars).clone());
+    let ParsedFile { routine, globals } = input.parse();
+    dbg!(&routine);
     // let mut functions = [routine];
-    let ctx = Ctx {
-        config,
-        vars,
-        globals,
-    };
+    let ctx = Ctx { config, globals };
     // for instr in routine.into_instr_vec() {
     //     println!("{instr}");
     // }

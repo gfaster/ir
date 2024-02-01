@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Type {
     Int(IntType),
     Ptr,
@@ -39,6 +39,17 @@ impl Type {
     pub const fn from_width(w: u8) -> Self {
         assert!(w != 0);
         Type::Int(IntType(w))
+    }
+}
+
+impl std::fmt::Debug for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Type::Int(IntType(l)) => write!(f, "i{l}"),
+            Type::Ptr => write!(f, "ptr"),
+            Type::Label => write!(f, "label"),
+            Type::Void => write!(f, "void"),
+        }
     }
 }
 
