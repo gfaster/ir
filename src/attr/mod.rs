@@ -48,6 +48,13 @@ impl BindAttributes {
         Self { name, ..self }
     }
 
+    pub fn with_name_ref(self, name: impl AsRef<str>) -> Self {
+        Self {
+            name: name.as_ref().into(),
+            ..self
+        }
+    }
+
     pub fn set_name(&mut self, name: Arc<str>) -> &mut Self {
         self.name = name;
         self

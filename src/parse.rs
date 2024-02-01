@@ -824,7 +824,7 @@ impl Parser {
                 };
                 let res = func.insert_instruction_after(
                     Instruction::from_inner(inner),
-                    [BindAttributes::new(res_ty)],
+                    [BindAttributes::new(res_ty).with_name_ref(dst)],
                     *current_trail,
                 );
                 let Some(res) = res.last() else {

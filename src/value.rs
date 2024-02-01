@@ -14,7 +14,7 @@ use crate::{
     list::{self, List, ThinRef},
     reg::Immediate,
     ty::Type,
-    GlobalData,
+    warn_once, GlobalData,
 };
 
 type OptPtr<T> = Option<NonNull<T>>;
@@ -219,6 +219,10 @@ impl std::fmt::Debug for Function {
             let val = val.inner.borrow();
             let name = val.attr.name();
             let ty = val.attr.ty();
+            if matches!(val.inner, ValueType::Imm(_)) {
+                warn_once!("[WARNING] We lie about what immediates are");
+                continue;
+            }
             if ty != Type::void() {
                 write!(f, "{ty:?} {name}")?;
             } else {
@@ -250,9 +254,13 @@ impl std::fmt::Debug for Function {
 
                     for op in instr.args_iter() {
                         let rcell = self.get_value(op);
-                        let name = rcell.attr.name();
                         let ty = rcell.attr.ty();
-                        write!(f, "{ty:?} {name}, ")?;
+                        if let ValueType::Imm(i) = rcell.inner {
+                            write!(f, "{ty:?} {i}, ")?;
+                        } else {
+                            let name = rcell.attr.name();
+                            write!(f, "{ty:?} {name}, ")?;
+                        }
                     }
 
                     if mnemonic != "call" {
