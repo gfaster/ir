@@ -191,6 +191,19 @@ impl Function {
         VRef(lref.into_inner().inner.borrow())
     }
 
+    pub fn get_value_mut<'a>(&'a self, vref: ValueHandle) -> VMut<'a> {
+        let lref = vref.0.promote(&self.text);
+        VMut(lref.into_inner().inner.borrow_mut())
+    }
+
+    pub fn block_iter(&self) -> impl Iterator<Item = Block> {
+        self.text.iter().filter(|v| {
+            v.inner.borrow().inner.is_block()
+        }).map(|b| {
+                Block { func: self, head: b.into() }
+            })
+    }
+
     fn end_of_res_list<'a>(&'a self, ptr: list::Ref<'a, Value>) -> list::Ref<'a, Value> {
         match ptr.inner.borrow().inner {
             ValueType::Block { args: Some(next) }
@@ -223,11 +236,9 @@ impl std::fmt::Debug for Function {
                 warn_once!("[WARNING] We lie about what immediates are");
                 continue;
             }
-            if ty != Type::void() {
+            if !ty.is_void() {
                 write!(f, "{ty:?} {name}")?;
-            } else {
-                write!(f, "{name}")?;
-            };
+            }
             match &val.inner {
                 ValueType::Global(_) => writeln!(f, "[[global value]]"),
                 ValueType::Imm(i) => writeln!(f, " = {i}"),
@@ -246,10 +257,13 @@ impl std::fmt::Debug for Function {
                 }
                 ValueType::Instr { instr, add_res } => {
                     let mnemonic = instr.mnemonic();
-                    if mnemonic != "call" {
-                        write!(f, " = {mnemonic} ")?;
-                    } else {
-                        write!(f, " = {mnemonic} (")?;
+                    if !ty.is_void() {
+                        write!(f, " = ")?;
+                    }
+                    write!(f, "{mnemonic} ")?;
+
+                    if mnemonic == "call" {
+                        write!(f, "(")?;
                     }
 
                     for op in instr.args_iter() {
@@ -308,6 +322,26 @@ enum ValueType {
     },
 }
 
+impl Value {
+    pub fn borrow(&self) -> cell::Ref<'_, ValueInner> {
+        self.inner.borrow()
+    }
+
+    pub fn borrow_mut(&self) -> RefMut<'_, ValueInner> {
+        self.inner.borrow_mut()
+    }
+}
+
+impl ValueType {
+    /// Returns `true` if the value type is [`Block`].
+    ///
+    /// [`Block`]: ValueType::Block
+    #[must_use]
+    fn is_block(&self) -> bool {
+        matches!(self, Self::Block { .. })
+    }
+}
+
 impl ValueInner {
     /// set the next ptr for multiple result instructions
     fn set_next_ptr(&mut self, ptr: InternalHandle) {
@@ -320,8 +354,30 @@ impl ValueInner {
         }
     }
 
+    pub fn as_instr(&self) -> Option<&Instruction> {
+        let ValueType::Instr { instr, .. } = &self.inner else { return None };
+        Some(instr)
+    }
+
     fn next_res(&self) -> Option<&ValueInner> {
         todo!()
+    }
+}
+
+pub struct Block<'a> {
+    func: &'a Function,
+    head: InternalHandle,
+}
+
+impl Block<'_> {
+    pub fn val_iter(&self) -> impl Iterator<Item = &Value> {
+        let head = self.func.internal_deref(self.head);
+        let mut past_first = false;
+        head.make_iter().take_while(move |v| {
+            let pass = !past_first || !v.inner.borrow().inner.is_block();
+            past_first = true;
+            pass
+        }).map(|x| x.into_inner())
     }
 }
 

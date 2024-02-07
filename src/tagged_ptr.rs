@@ -23,7 +23,8 @@ pub fn assert_valid_cpu() {
     if PTR_BITS == usize::BITS as usize {
         panic!("I don't know how big the virtual address space is!")
     }
-    if cfg!(target_arch = "x86_64") {
+    #[cfg(target_arch = "x86_64")]
+    {
         // https://en.wikipedia.org/wiki/CPUID#EAX=80000008h:_Virtual_and_Physical_address_Sizes
         let info: u32;
         unsafe {
@@ -62,11 +63,14 @@ impl<T> TPtr<T> {
         debug_assert!(tag.0.leading_zeros() as usize >= usize::BITS as usize - Self::BITS);
         debug_assert!(tag.0.leading_zeros() >= Self::MASK.count_ones());
 
-        if cfg!(target_feature = "bmi2") && cfg!(target_arch = "x86_64") && !cfg!(miri) {
+        #[cfg(all(target_arch = "x86_64", target_feature = "bmi2"))]
+        if !cfg!(miri) {
             unsafe { Self::new_fast(tag, ptr) }
         } else {
             Self::new_fallback(tag, ptr)
         }
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "bmi2")))]
+        Self::new_fallback(tag, ptr)
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -92,11 +96,14 @@ impl<T> TPtr<T> {
     }
 
     pub fn tag(self) -> PtrTag {
-        if cfg!(target_feature = "bmi2") && cfg!(target_arch = "x86_64") && !cfg!(miri) {
+        #[cfg(all(target_arch = "x86_64", target_feature = "bmi2"))]
+        if !cfg!(miri) {
             unsafe { self.tag_fast() }
         } else {
             self.tag_fallback()
         }
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "bmi2")))]
+        self.tag_fallback()
     }
 
     /// This should compile to a single `pext` instruction

@@ -60,6 +60,11 @@ impl BindAttributes {
         self
     }
 
+    pub fn set_name_ref(&mut self, name: impl AsRef<str>) -> &mut Self {
+        self.name = name.as_ref().into();
+        self
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }

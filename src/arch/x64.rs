@@ -1,137 +1,31 @@
 #![allow(non_camel_case_types)]
 use crate::{
     instr::{ArgCnt, BasicInstrProp, MachineInstrProp},
-    regstate::PhysRegUse,
+    regstate::PhysRegUse, ty::{MachineType, MachineLocationType},
 };
 
-pub mod r {
-    use crate::{
-        arch::RegBankInfo,
-        reg::{MachineReg, RegBank},
-    };
+use crate::ty::Type as Ty;
 
-    macro_rules! machine_regs {
-        (@decl $($name:ident: $val:literal);*) => {
-            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-            #[repr(u16)]
-            pub enum Reg { $($name = $val),*}
-        };
-        (@name $($name:ident: $mne:literal);*) => {
-            pub const fn name(self) -> &'static str {
-                match self {
-                    $(Self::$name => $mne),*
-                }
-            }
-        };
-        (@from_idx $($name:ident: $val:literal);*) => {
-            pub const fn from_idx(loc: u16) -> Self {
-                match loc {
-                    $($val => Self::$name,)*
-                    _ => panic!("invalid register idx")
-                }
-            }
-        };
-        (@from_name $($name:ident: $mne:literal);*) => {
-            pub fn from_name(name: &str) -> Self {
-                match name {
-                    $($mne => Self::$name,)*
-                    _ => panic!("invalid register name {name:?}")
-                }
-            }
-        };
-        ($($name:ident: $mne:literal, $val:literal);*$(;)?) => {
-            machine_regs!(@decl $($name: $val);*);
-            impl Reg {
-                machine_regs!(@name $($name: $mne);*);
-                machine_regs!(@from_idx $($name: $val);*);
-                machine_regs!(@from_name $($name: $mne);*);
-                pub const fn idx(self) -> u16 {
-                    self as u16
-                }
-            }
-        };
-    }
-    machine_regs! {
-        Rax: "rax", 0;
-        Rcx: "rcx", 1;
-        Rdx: "rdx", 2;
-        Rsi: "rsi", 3;
-        Rdi: "rdi", 4;
-        Rsp: "rsp", 5;
-        Rbp: "rbp", 6;
-        R8:  "r8",  7;
-        R9:  "r9",  8;
-        R10: "r10", 9;
-        R11: "r11", 10;
-        R12: "r12", 11;
-        R13: "r13", 12;
-        R14: "r14", 13;
-        R15: "r15", 14;
-        Eflags: "[[EFLAGS]]", 15;
-    }
+use super::SelectInstr;
+mod isel;
+pub mod r;
 
-    impl Reg {
-        pub const fn bank(&self) -> RegBank {
-            match self {
-                Reg::Eflags => RegBank(1),
-                _ => RegBank(0),
-            }
-        }
-
-        pub const fn gprs() -> &'static [Self] {
-            &[
-                Self::Rax,
-                Self::Rcx,
-                Self::Rdx,
-                Self::Rsi,
-                Self::Rdi,
-                Self::R8,
-                Self::R9,
-                Self::R10,
-                Self::R11,
-                Self::R12,
-                Self::R13,
-                Self::R14,
-                Self::R15,
-            ]
-        }
-
-        pub const fn can_mov_to(&self, other: &Self) -> bool {
-            self.bank().0 == other.bank().0
-        }
-
-        /// whether this register can be used as a mov src
-        pub const fn can_mov_from(&self) -> bool {
-            match self {
-                Self::Eflags => false,
-                _ => true,
-            }
-        }
-
-        pub const fn may_spill(&self) -> bool {
-            self.can_mov_from()
-        }
-
-        pub const fn to_mach(&self) -> MachineReg {
-            MachineReg::from_idx(*self as u16)
-        }
-
-        pub const fn from_mach(mr: MachineReg) -> Self {
-            Self::from_idx(mr.idx())
-        }
-    }
-
-    pub const REG_BANK_INFO: [RegBankInfo; 2] = [
-        RegBankInfo {
-            transfer_cost: &[0, u16::MAX],
-            name: "gpr",
-        },
-        RegBankInfo {
-            transfer_cost: &[0, u16::MAX],
-            name: "flags",
-        },
-    ];
-}
+const II64: MachineType = MachineType {
+    ty: Ty::i64(),
+    loc: MachineLocationType::Imm,
+};
+const MI64: MachineType = MachineType {
+    ty: Ty::i64(),
+    loc: MachineLocationType::Reg,
+};
+const DISP: MachineType = MachineType {
+    ty: Ty::displacement(),
+    loc: MachineLocationType::Imm,
+};
+const FLAG: MachineType = MachineType {
+    ty: Ty::i1(),
+    loc: MachineLocationType::Reg,
+};
 
 const BASIC_TEMPLATE: BasicInstrProp = BasicInstrProp {
     op_cnt: 0,
@@ -177,6 +71,7 @@ const OP_BIN_RR_R: MachineInstrProp = MachineInstrProp {
     ref_regs: &[],
     operand_use: &[PhysRegUse::UseDef, PhysRegUse::UseDef, PhysRegUse::Use],
     op_eq_constraints: &[0, 0, 1],
+    op_ty: &[MI64, MI64, MI64]
 };
 
 const OP_BIN_RR_F: MachineInstrProp = MachineInstrProp {
@@ -188,9 +83,10 @@ const OP_BIN_RR_F: MachineInstrProp = MachineInstrProp {
     ref_regs: &[(r::Reg::Eflags.to_mach(), PhysRegUse::Def)],
     operand_use: &[PhysRegUse::Use, PhysRegUse::Use],
     op_eq_constraints: &[0, 1, 2],
+    op_ty: &[MI64, MI64, FLAG]
 };
 
-const BIN_RR_FR: MachineInstrProp = MachineInstrProp {
+const OP_BIN_RR_FR: MachineInstrProp = MachineInstrProp {
     basic: BasicInstrProp {
         op_cnt: 2,
         res_cnt: 2,
@@ -200,4 +96,75 @@ const BIN_RR_FR: MachineInstrProp = MachineInstrProp {
     operand_use: &[PhysRegUse::UseDef, PhysRegUse::UseDef, PhysRegUse::Use],
     op_eq_constraints: &[0, 0, 1],
     ref_regs: &[(r::Reg::Eflags.to_mach(), PhysRegUse::Def)],
+    op_ty: &[MI64, MI64, MI64, FLAG]
 };
+
+const OP_BIN_RI_FR: MachineInstrProp = MachineInstrProp {
+    op_ty: &[MI64, MI64, II64, FLAG],
+    ..OP_BIN_RR_FR
+};
+
+/// Binary Reg, Mem(read-only) -> Reg + Flags
+///
+/// ex:
+/// ```x86asm
+/// add r9, qword ptr [0x28 + rsp + 4 * rcx]
+const OP_BIN_RM_RF: MachineInstrProp = MachineInstrProp {
+    basic: BasicInstrProp {
+        op_cnt: 2,
+        res_cnt: 1,
+        is_branch: false,
+        is_terminator: false,
+        is_commutative: false,
+        may_read_memory: true,
+        ..BASIC_TEMPLATE
+    },
+    ref_regs: &[(r::Reg::Eflags.to_mach(), PhysRegUse::Def)],
+    operand_use: &[PhysRegUse::UseDef, PhysRegUse::UseDef, PhysRegUse::Use],
+    op_eq_constraints: &[0, 0, 1, 2, 3, 4],
+    op_ty: &[]
+};
+
+macro_rules! def_instr {
+    ($base:expr => $name:ident $(:)? ) => {
+        const _: MachineInstrProp = $base;
+        compile_error!(": $mnemonic");
+    };
+    ($base:expr => ) => {
+        const _: MachineInstrProp = $base;
+        compile_error!("missing: $name: $mnemonic");
+    };
+    ($base:expr) => {
+        const _: MachineInstrProp = $base;
+        compile_error!("missing: => $name: $mnemonic");
+    };
+    () => {
+        compile_error!("missing: $base => $name: $mnemonic");
+    };
+    ($base:expr => $name:ident: $mnemonic:literal) => {
+        pub const $name: MachineInstrProp = MachineInstrProp {
+            basic: BasicInstrProp {
+                mnemonic: $mnemonic,
+                ..$base.basic
+            },
+            ..$base
+        };
+    };
+}
+
+def_instr!(OP_BIN_RI_FR => I_ADD_RI: "add");
+def_instr!(OP_BIN_RR_FR => I_ADD_RR: "add");
+
+#[cfg(test)]
+mod tests {
+    use macros::new_instr;
+
+    #[test]
+    fn test0() {
+        new_instr!{
+            Instr = "add x1:ty x2:ty";
+        };
+        dbg!(Instr);
+        panic!();
+    }
+}

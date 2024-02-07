@@ -1,7 +1,7 @@
 use crate::{
     reg::Immediate,
     regstate::PhysRegUse,
-    value::{Function, ValueHandle},
+    value::{Function, ValueHandle}, ty::MachineType,
 };
 use std::{
     cell::Cell,
@@ -39,7 +39,16 @@ pub struct MachineInstrProp {
     /// This is represented as a 3-operand instruction, but the destination operand and the first
     /// source operand are in the same register. In this case, `op_eq_constraints` would be
     /// `&[0, 0, 1]`.
+    ///
+    /// Also note that this only applies once operands are de-virtualized
     pub op_eq_constraints: &'static [u8],
+
+    /// Operand types
+    ///
+    /// The layout is as follows: `[explicit ops .. , implicit ops .. ]`
+    ///
+    /// It is invalid for `op_ty` to be `void`
+    pub op_ty: &'static [MachineType]
 }
 
 impl std::cmp::PartialEq for MachineInstrProp {
@@ -537,20 +546,10 @@ impl std::fmt::Display for Target {
     }
 }
 
-/// instruction id, currently not used
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct InstrId(usize);
-impl InstrId {
-    fn new() -> Self {
-        static CNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        InstrId(CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct Instruction {
     /// attributes of defined binding
-    inner: OpInner,
+    pub inner: OpInner,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -701,7 +700,7 @@ impl Instruction {
             OpInner::Alloc { .. } => &BasicInstrProp {
                 op_cnt: 1,
                 res_cnt: 1,
-                mnemonic: "br",
+                mnemonic: "alloca",
                 is_commutative: false,
                 has_side_effects: false,
                 may_read_memory: false,

@@ -4,6 +4,8 @@ pub enum Type {
     Ptr,
     Label,
     Void,
+    /// x64 memory displacement operand (1, 2, 4, or 8)
+    Displacement,
 }
 
 const _: () = assert!(usize::BITS == u64::BITS);
@@ -24,6 +26,7 @@ impl Type {
             Type::Ptr => 64,
             Type::Label => 0,
             Type::Void => 0,
+            Type::Displacement => 0,
         }
     }
 
@@ -33,6 +36,7 @@ impl Type {
             Type::Ptr => u64::MAX,
             Type::Label => 0,
             Type::Void => 0,
+            Type::Displacement => 8,
         }
     }
 
@@ -49,6 +53,7 @@ impl std::fmt::Debug for Type {
             Type::Ptr => write!(f, "ptr"),
             Type::Label => write!(f, "label"),
             Type::Void => write!(f, "void"),
+            Type::Displacement => Ok(()),
         }
     }
 }
@@ -89,8 +94,7 @@ macro_rules! ty_unit {
             Self::$var
         }
         pub const fn $is_fn(&self) -> bool {
-            todo!()
-            // &Self::$var == self
+            matches!(self, Self::$var)
         }
     };
 }
@@ -99,4 +103,17 @@ ty_unit!(Type {
     Void: void, is_void;
     Ptr: ptr, is_ptr;
     Label: label, is_label;
+    Displacement: displacement, is_displacement;
 });
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MachineType {
+    pub ty: Type,
+    pub loc: MachineLocationType
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MachineLocationType {
+    Imm,
+    Reg,
+}

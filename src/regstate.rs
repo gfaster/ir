@@ -18,6 +18,7 @@ use std::rc::Rc;
 pub enum PhysRegUse {
     Clobbered,
     UseClobber,
+    /// used - also used by immediate
     Use,
     Def,
     UseDef,

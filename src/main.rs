@@ -35,6 +35,7 @@ mod list;
 mod regstate;
 mod tagged_ptr;
 mod value;
+mod isel;
 
 mod parse;
 use asm::{AsmOp, OpTarget};
@@ -613,33 +614,6 @@ impl Config {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // let globals = [GlobalData {
-    //     name: ".hello".into(),
-    //     data: b"Hello, World!\n".as_slice().into(),
-    // },
-    // ];
-    // syscall uses rdi rsi rdx r10 r8 r9
-    // let mut functions = [Routine {
-    //     name: "_start".into(),
-    //     ops: vec![
-    //         Op::Load { loc: 4, val: Val::Literal(0), },
-    //         Op::Block { id: 1, args: vec![4] },
-    //         Op::Load { loc: 6, val: Val::Literal(5), },
-    //         Op::Load { loc: 0, val: Val::Literal(1), },
-    //         Op::Load { loc: 1, val: Val::Literal(1), },
-    //         Op::Load { loc: 2, val: Val::GlobalLabel(0), },
-    //         Op::Load { loc: 3, val: Val::Literal(14), },
-    //         Op::Call { id: 0, args: vec![0, 1, 2, 3], },
-    //         Op::Add { dst: 7, op1: 4, op2: 1 },
-    //         Op::Bne { check:(7,6),
-    //             success: Target { id: 1, args: vec![7] },
-    //             fail: Target { id: 2, args: vec![] } },
-    //         Op::Block { id: 2, args: vec![] },
-    //         Op::Load { loc: 4, val: Val::Literal(60), },
-    //         Op::Load { loc: 5, val: Val::Literal(0), },
-    //         Op::Call { id: 0, args: vec![4, 5], },
-    //     ],
-    // }];
 
     let config = Config::new();
 

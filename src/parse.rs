@@ -769,14 +769,17 @@ impl Parser {
                 continue;
             };
             let collected = rules::collect_decl_args(args);
-            let iter = collected.iter().map(|(ty, _)| BindAttributes::new(*ty));
+            let iter = collected.iter().map(|(ty, _)| BindAttributes::new(*ty).with_name_ref(idt));
+            let mut first_handle = None;
             for (handle, ident) in func.push_block(iter).zip(
                 [idt.as_ref()]
                     .into_iter()
                     .chain(collected.iter().map(|i| i.1.get_str())),
             ) {
+                first_handle = first_handle.or(Some(handle));
                 idents.assign(ident, handle)
             }
+            func.get_value_mut( first_handle.expect("has first")).attr.set_name_ref(idt);
         }
     }
 
