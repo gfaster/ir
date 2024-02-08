@@ -1,4 +1,6 @@
 #![allow(non_camel_case_types)]
+use macros::new_instr;
+
 use crate::{
     instr::{ArgCnt, BasicInstrProp, MachineInstrProp},
     regstate::PhysRegUse, ty::{MachineType, MachineLocationType},
@@ -125,6 +127,17 @@ const OP_BIN_RM_RF: MachineInstrProp = MachineInstrProp {
     op_ty: &[]
 };
 
+new_instr!{
+    let is_commutative = true, has_side_effects = false => {
+        ADD = "add a:MI64 b:MI64";
+    };
+}
+
+const OP_BIN_RM_RF_: MachineInstrProp = MachineInstrProp {
+    ..ADD
+};
+
+
 macro_rules! def_instr {
     ($base:expr => $name:ident $(:)? ) => {
         const _: MachineInstrProp = $base;
@@ -161,10 +174,7 @@ mod tests {
 
     #[test]
     fn test0() {
-        new_instr!{
-            Instr = "add x1:ty x2:ty";
-        };
-        dbg!(Instr);
+        dbg!(super::ADD.basic.is_commutative);
         panic!();
     }
 }
